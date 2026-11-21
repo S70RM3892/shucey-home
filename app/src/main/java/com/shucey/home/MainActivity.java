@@ -8,216 +8,681 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.view.Gravity;
 import android.view.View;
-import android.widget.Button;
+import android.view.WindowInsets;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextClock;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.List;
-import java.util.Locale;
 import java.util.Random;
 
-public class MainActivity extends Activity implements PeriodicTableView.OnElementTapListener {
+public class MainActivity extends Activity implements PeriodicTableView.Listener, AppDrawer.Listener {
 
-    private static final int FG = 0xFFE6EDF3, FG2 = 0xFF9DA7B3, BG = 0xFF0E1116, CARD = 0xFF161B22;
-    private static final String[] POOL_NAMES = {"1〜20番", "入試頻出", "全118元素"};
-    /** 入試頻出: 1〜36 に加えて無機化学で頻出の重元素 */
-    private static final int[] FREQUENT_EXTRA = {47, 50, 53, 55, 56, 78, 79, 80, 82};
+    private static final String[] MODES = {"分類", "電気陰性度", "イオン化E", "状態"};
+    private static final String[][] CATEGORIES = {
+            {"alkali", "アルカリ金属"}, {"alkaline_earth", "アルカリ土類"}, {"transition", "遷移元素"},
+            {"metal", "典型金属"}, {"nonmetal", "典型非金属"}, {"halogen", "ハロゲン"},
+            {"noble", "貴ガス"}, {"lanthanoid", "ランタノイド"}, {"actinoid", "アクチノイド"}};
 
-    private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Random random = new Random();
     private List<Element> elements;
-    private PeriodicTableView table;
-    private TextView detail, quizText, nightBanner, legend;
-    private Button quizButton, poolButton;
-    private LinearLayout quizBar, dock;
-    private ScrollView scroll;
-    private float dp;
     private SharedPreferences prefs;
+    private Quiz quiz;
+    private boolean quizOn, answered;
 
-    private boolean quiz;
-    private int pool, streak;
-    private Element target;
-    private boolean answering;
+    private FrameLayout root;
+    private LinearLayout home, header, modeBar, legend, homeCards, quizPanel, quizFeedback, poolRow;
+    private HorizontalScrollView legendScroll;
+    private PeriodicTableView table;
+    private MagnifierView magnifier;
+    private ScrollView panelScroll;
+    private ElementPanel elementPanel, quizElementPanel;
+    private TextView nightCard, quizQuestion, quizStats, quizResult, quizHint, quizBest, todayTitle, todayNote, todayTile;
+    private DockBar dock;
+    private AppDrawer drawer;
+    private Element today;
+    private String filter;
 
     private final BroadcastReceiver tick = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) { updateNight(); }
+    };
+    private final BroadcastReceiver packages = new BroadcastReceiver() {
+        @Override public void onReceive(Context c, Intent i) {
+            drawer.reload();
+            rebuildDock();
+        }
     };
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        dp = getResources().getDisplayMetrics().density;
+        Ui.init(this);
         prefs = Dock.prefs(this);
-        pool = prefs.getInt("pool", 1);
         elements = Element.load(this);
+        quiz = new Quiz(elements, prefs, new Random());
+        initDefaultDock();
+
+        // 画面の端まで描く（システムバーの裏にも背景を通す）
+        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
+        else getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+
         setContentView(buildUi());
-        showWelcome();
+        showHome(false);
+        table.playAppear();
+
+        IntentFilter pf = new IntentFilter();
+        pf.addAction(Intent.ACTION_PACKAGE_ADDED);
+        pf.addAction(Intent.ACTION_PACKAGE_REMOVED);
+        pf.addAction(Intent.ACTION_PACKAGE_CHANGED);
+        pf.addDataScheme("package");
+        register(packages, pf);
+        drawer.reload();
     }
 
-    // ---------------------------------------------------------------- UI
+    private void register(BroadcastReceiver r, IntentFilter f) {
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(r, f, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(r, f);
+    }
 
-    private int px(float v) { return (int) (v * dp); }
+    // ================================================================ 画面構築
 
     private View buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(BG);
-        root.setFitsSystemWindows(true);
+        root = new FrameLayout(this);
+        root.setBackgroundColor(Ui.scrim);
 
-        // 時計
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.VERTICAL);
-        top.setPadding(px(16), px(12), px(16), px(4));
-        TextClock clock = new TextClock(this);
-        clock.setFormat24Hour("HH:mm");
-        clock.setFormat12Hour("HH:mm");
-        clock.setTextSize(44);
-        clock.setTextColor(FG);
-        clock.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        clock.setOnLongClickListener(v -> {
-            startActivity(new Intent(Settings.ACTION_HOME_SETTINGS));
-            return true;
-        });
-        top.addView(clock);
-        TextClock date = new TextClock(this);
-        date.setFormat24Hour("M月d日（E）");
-        date.setFormat12Hour("M月d日（E）");
-        date.setTextColor(FG2);
-        date.setTextSize(14);
-        top.addView(date);
-        root.addView(top);
+        home = new LinearLayout(this);
+        home.setOrientation(LinearLayout.VERTICAL);
+        root.addView(home, new FrameLayout.LayoutParams(-1, -1));
 
-        nightBanner = new TextView(this);
-        nightBanner.setTextColor(0xFFFFCC80);
-        nightBanner.setTextSize(14);
-        nightBanner.setPadding(px(16), px(8), px(16), px(8));
-        nightBanner.setBackgroundColor(0xFF2A1A0A);
-        nightBanner.setVisibility(View.GONE);
-        root.addView(nightBanner, new LinearLayout.LayoutParams(-1, -2));
-
-        // クイズバー
-        quizBar = new LinearLayout(this);
-        quizBar.setOrientation(LinearLayout.HORIZONTAL);
-        quizBar.setGravity(Gravity.CENTER_VERTICAL);
-        quizBar.setPadding(px(16), px(6), px(8), px(6));
-        quizBar.setVisibility(View.GONE);
-        quizText = new TextView(this);
-        quizText.setTextColor(FG);
-        quizText.setTextSize(17);
-        quizBar.addView(quizText, new LinearLayout.LayoutParams(0, -2, 1f));
-        poolButton = smallButton("");
-        poolButton.setOnClickListener(v -> {
-            pool = (pool + 1) % POOL_NAMES.length;
-            prefs.edit().putInt("pool", pool).apply();
-            updatePoolButton();
-            nextQuestion();
-        });
-        quizBar.addView(poolButton);
-        root.addView(quizBar, new LinearLayout.LayoutParams(-1, -2));
-
-        // 本体（周期表 + 凡例 + 詳細）
-        scroll = new ScrollView(this);
-        LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(px(4), 0, px(4), px(12));
-
+        buildHeader();
         table = new PeriodicTableView(this);
         table.setElements(elements);
-        table.setOnElementTapListener(this);
-        body.addView(table, new LinearLayout.LayoutParams(-1, -2));
+        table.setListener(this);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, -2);
+        tlp.setMargins(Ui.dp(4), 0, Ui.dp(4), 0);
+        home.addView(table, tlp);
 
-        legend = new TextView(this);
-        legend.setTextSize(11);
-        legend.setPadding(px(8), px(4), px(8), px(8));
-        legend.setText(buildLegend());
-        body.addView(legend);
+        buildModeBar();
+        legendScroll = new HorizontalScrollView(this);
+        legendScroll.setHorizontalScrollBarEnabled(false);
+        legendScroll.setClipToPadding(false);
+        legendScroll.setPadding(Ui.dp(12), 0, Ui.dp(12), 0);
+        legend = new LinearLayout(this);
+        legend.setGravity(Gravity.CENTER_VERTICAL);
+        legendScroll.addView(legend, new FrameLayout.LayoutParams(-2, Ui.dp(40)));
+        home.addView(legendScroll, new LinearLayout.LayoutParams(-1, -2));
+        rebuildLegend();
 
-        detail = new TextView(this);
-        detail.setTextColor(FG);
-        detail.setTextSize(15);
-        detail.setLineSpacing(0, 1.15f);
-        detail.setPadding(px(16), px(14), px(16), px(14));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(CARD);
-        bg.setCornerRadius(px(12));
-        detail.setBackground(bg);
-        detail.setTextIsSelectable(false);
-        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, -2);
-        dlp.setMargins(px(8), px(4), px(8), 0);
-        body.addView(detail, dlp);
+        // --- 下半分: ホーム / 元素詳細 / クイズ を切り替える ---
+        panelScroll = new ScrollView(this);
+        panelScroll.setVerticalScrollBarEnabled(false);
+        panelScroll.setVerticalFadingEdgeEnabled(true);
+        panelScroll.setFadingEdgeLength(Ui.dp(20));
+        panelScroll.setOverScrollMode(View.OVER_SCROLL_ALWAYS);
+        panelScroll.setClipToPadding(false);
+        panelScroll.setPadding(Ui.dp(12), Ui.dp(4), Ui.dp(12), Ui.dp(12));
+        FrameLayout panel = new FrameLayout(this);
+        panelScroll.addView(panel, new FrameLayout.LayoutParams(-1, -2));
+        home.addView(panelScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
 
-        scroll.addView(body);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        buildHomeCards();
+        panel.addView(homeCards, new FrameLayout.LayoutParams(-1, -2));
+        elementPanel = new ElementPanel(this);
+        elementPanel.setBackground(Ui.round(Ui.surface, 24));
+        elementPanel.setPadding(Ui.dp(14), Ui.dp(14), Ui.dp(14), Ui.dp(14));
+        panel.addView(elementPanel, new FrameLayout.LayoutParams(-1, -2));
+        buildQuizPanel();
+        panel.addView(quizPanel, new FrameLayout.LayoutParams(-1, -2));
 
-        // ドック
-        dock = new LinearLayout(this);
-        dock.setOrientation(LinearLayout.HORIZONTAL);
+        // --- ドック ---
+        dock = new DockBar(this);
         dock.setGravity(Gravity.CENTER_VERTICAL);
-        dock.setPadding(px(8), px(6), px(8), px(8));
-        dock.setBackgroundColor(CARD);
-        root.addView(dock, new LinearLayout.LayoutParams(-1, -2));
+        dock.setBackground(Ui.round(Ui.alpha(Ui.surface, 0.92f), 30));
+        dock.setPadding(Ui.dp(10), Ui.dp(8), Ui.dp(10), Ui.dp(8));
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, Ui.dp(72));
+        dlp.setMargins(Ui.dp(12), 0, Ui.dp(12), Ui.dp(10));
+        home.addView(dock, dlp);
 
-        quizButton = smallButton("クイズ");
-        quizButton.setOnClickListener(v -> setQuiz(!quiz));
-        updatePoolButton();
+        magnifier = new MagnifierView(this);
+        root.addView(magnifier, new FrameLayout.LayoutParams(-1, -1));
+
+        drawer = new AppDrawer(this);
+        drawer.setListener(this);
+        dock.setDrawer(drawer);
+        root.addView(drawer, new FrameLayout.LayoutParams(-1, -1));
+
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top, bottom, ime;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+                top = bars.top;
+                bottom = bars.bottom;
+                ime = Math.max(bottom, insets.getInsets(WindowInsets.Type.ime()).bottom);
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                ime = insets.getSystemWindowInsetBottom();
+                bottom = insets.getStableInsetBottom();
+            }
+            home.setPadding(0, top, 0, bottom);
+            drawer.setInsets(top, ime);
+            return insets;
+        });
         return root;
     }
 
-    private Button smallButton(String label) {
-        Button btn = new Button(this);
-        btn.setText(label);
-        btn.setAllCaps(false);
-        btn.setTextSize(13);
-        btn.setTextColor(FG);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFF21262D);
-        bg.setCornerRadius(px(18));
-        btn.setBackground(bg);
-        btn.setMinHeight(px(40));
-        btn.setMinimumHeight(px(40));
-        btn.setPadding(px(14), 0, px(14), 0);
-        return btn;
+    private void buildHeader() {
+        header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(Ui.dp(20), Ui.dp(10), Ui.dp(8), Ui.dp(6));
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        TextClock clock = new TextClock(this);
+        clock.setFormat24Hour("H:mm");
+        clock.setFormat12Hour("H:mm");
+        clock.setTextSize(44);
+        clock.setTextColor(Ui.onSurface);
+        clock.setIncludeFontPadding(false);
+        clock.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        col.addView(clock);
+        TextClock date = new TextClock(this);
+        date.setFormat24Hour("M月d日 EEEE");
+        date.setFormat12Hour("M月d日 EEEE");
+        date.setTextColor(Ui.onSurfaceVar);
+        date.setTextSize(14);
+        date.setPadding(Ui.dp(2), Ui.dp(2), 0, 0);
+        col.addView(date);
+        header.addView(col, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        TextView menu = ElementPanel.text(this, 22, Ui.onSurfaceVar, true, "⋮");
+        menu.setGravity(Gravity.CENTER);
+        menu.setBackground(Ui.ripple(0x00000000, 22));
+        menu.setContentDescription("メニュー");
+        menu.setOnClickListener(v -> {
+            Ui.tap(v);
+            PopupMenu m = new PopupMenu(this, v);
+            m.getMenu().add(0, 1, 0, "ホームアプリの設定");
+            m.getMenu().add(0, 2, 1, "壁紙を変更");
+            m.setOnMenuItemClickListener(item -> {
+                try {
+                    startActivity(item.getItemId() == 1 ? new Intent(Settings.ACTION_HOME_SETTINGS)
+                            : Intent.createChooser(new Intent(Intent.ACTION_SET_WALLPAPER), "壁紙を変更"));
+                } catch (Exception ignored) {
+                    // 対応する設定画面がない端末
+                }
+                return true;
+            });
+            m.show();
+        });
+        header.addView(menu, new LinearLayout.LayoutParams(Ui.dp(44), Ui.dp(44)));
+        home.addView(header);
     }
 
-    private CharSequence buildLegend() {
-        String[][] items = {
-                {"alkali", "アルカリ金属"}, {"alkaline_earth", "アルカリ土類"}, {"transition", "遷移元素"},
-                {"metal", "典型金属"}, {"nonmetal", "典型非金属"}, {"halogen", "ハロゲン"},
-                {"noble", "貴ガス"}, {"lanthanoid", "ランタノイド"}, {"actinoid", "アクチノイド"}};
-        SpannableStringBuilder sb = new SpannableStringBuilder();
-        for (String[] it : items) {
-            int s = sb.length();
-            sb.append("■\u2060");
-            sb.setSpan(new ForegroundColorSpan(PeriodicTableView.categoryColor(it[0])), s, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            s = sb.length();
-            sb.append(it[1]).append("　");
-            sb.setSpan(new ForegroundColorSpan(FG2), s, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    private void buildModeBar() {
+        modeBar = new LinearLayout(this);
+        modeBar.setBackground(Ui.round(Ui.alpha(Ui.surface, 0.92f), 20));
+        modeBar.setPadding(Ui.dp(4), Ui.dp(4), Ui.dp(4), Ui.dp(4));
+        for (int i = 0; i < MODES.length; i++) {
+            final int m = i;
+            TextView t = ElementPanel.text(this, 13, Ui.onSurfaceVar, true, MODES[i]);
+            t.setGravity(Gravity.CENTER);
+            t.setOnClickListener(v -> {
+                if (table.getMode() == m) return;
+                Ui.tick(v);
+                filter = null;
+                table.setMode(m);
+                styleModeBar();
+                rebuildLegend();
+            });
+            modeBar.addView(t, new LinearLayout.LayoutParams(0, Ui.dp(32), 1f));
         }
-        return sb;
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(Ui.dp(12), Ui.dp(6), Ui.dp(12), 0);
+        home.addView(modeBar, lp);
+        styleModeBar();
+    }
+
+    private void styleModeBar() {
+        for (int i = 0; i < modeBar.getChildCount(); i++) {
+            TextView t = (TextView) modeBar.getChildAt(i);
+            boolean on = i == table.getMode();
+            t.setBackground(on ? Ui.round(Ui.accent, 16) : Ui.ripple(0x00000000, 16));
+            t.setTextColor(on ? Ui.onAccent : Ui.onSurfaceVar);
+        }
+    }
+
+    /** 色分けモードに応じた凡例。分類・状態は押すと絞り込める。 */
+    private void rebuildLegend() {
+        legend.removeAllViews();
+        legendScroll.scrollTo(0, 0);
+        int mode = table.getMode();
+        if (mode == PeriodicTableView.MODE_CATEGORY) {
+            for (String[] c : CATEGORIES) legend.addView(chip(c[0], c[1], PeriodicTableView.categoryColor(c[0])));
+        } else if (mode == PeriodicTableView.MODE_PHASE) {
+            for (String ph : new String[]{"固体", "液体", "気体"}) legend.addView(chip(ph, ph + "（常温）", PeriodicTableView.phaseColor(ph)));
+        } else {
+            boolean en = mode == PeriodicTableView.MODE_EN;
+            legend.addView(ElementPanel.text(this, 12, Ui.onSurfaceVar, false, "小"));
+            View bar = new View(this);
+            GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                    new int[]{PeriodicTableView.heat(0f), PeriodicTableView.heat(0.5f), PeriodicTableView.heat(1f)});
+            g.setCornerRadius(Ui.dpf(5));
+            bar.setBackground(g);
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(Ui.dp(72), Ui.dp(10));
+            blp.setMargins(Ui.dp(6), 0, Ui.dp(6), 0);
+            legend.addView(bar, blp);
+            legend.addView(ElementPanel.text(this, 12, Ui.onSurfaceVar, false, "大"));
+            TextView cap = ElementPanel.text(this, 12, Ui.onSurface, false,
+                    en ? "右上ほど大きい。最大は F（貴ガスは値なし）" : "右上ほど大きい。最大は He、同周期では貴ガス");
+            cap.setPadding(Ui.dp(12), 0, 0, 0);
+            legend.addView(cap);
+        }
+    }
+
+    private View chip(String key, String label, int color) {
+        boolean on = key.equals(filter);
+        SpannableStringBuilder sb = new SpannableStringBuilder("● ");
+        sb.setSpan(new ForegroundColorSpan(color), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.append(label);
+        TextView t = ElementPanel.text(this, 12, on ? Ui.onSurface : Ui.onSurfaceVar, on, sb);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(Ui.dp(11), 0, Ui.dp(13), 0);
+        t.setBackground(Ui.ripple(on ? Ui.over(color, Ui.surface, 0.32f) : Ui.alpha(Ui.surface, 0.92f), 15));
+        t.setOnClickListener(v -> {
+            Ui.tick(v);
+            filter = key.equals(filter) ? null : key;
+            table.setFilter(filter);
+            int x = legendScroll.getScrollX();
+            rebuildLegend();
+            legendScroll.post(() -> legendScroll.scrollTo(x, 0));
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, Ui.dp(30));
+        lp.rightMargin = Ui.dp(6);
+        t.setLayoutParams(lp);
+        return t;
+    }
+
+    // ---------------------------------------------------------------- ホームのカード
+
+    private LinearLayout card() {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setBackground(Ui.round(Ui.surface, 24));
+        c.setPadding(Ui.dp(16), Ui.dp(14), Ui.dp(16), Ui.dp(14));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.bottomMargin = Ui.dp(8);
+        c.setLayoutParams(lp);
+        return c;
+    }
+
+    private TextView pillButton(String label, boolean filled) {
+        TextView t = ElementPanel.text(this, 14, filled ? Ui.onAccent : Ui.accent, true, label);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(Ui.dp(20), 0, Ui.dp(20), 0);
+        t.setBackground(Ui.ripple(filled ? Ui.accent : Ui.surfaceHigh, 22));
+        t.setMinHeight(Ui.dp(44));
+        Ui.pressable(t);
+        return t;
+    }
+
+    private void buildHomeCards() {
+        homeCards = new LinearLayout(this);
+        homeCards.setOrientation(LinearLayout.VERTICAL);
+
+        nightCard = ElementPanel.text(this, 14, 0xFFFFCC80, false,
+                "23時を過ぎた。スマホを置いて寝ろ。今日覚えた内容は睡眠中に定着する。");
+        nightCard.setBackground(Ui.round(0xFF2B1D0E, 20));
+        nightCard.setPadding(Ui.dp(16), Ui.dp(12), Ui.dp(16), Ui.dp(12));
+        nightCard.setLineSpacing(0, 1.2f);
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(-1, -2);
+        nlp.bottomMargin = Ui.dp(8);
+        nightCard.setVisibility(View.GONE);
+        homeCards.addView(nightCard, nlp);
+
+        // 今日の元素
+        LinearLayout todayCard = card();
+        todayCard.setOrientation(LinearLayout.HORIZONTAL);
+        todayCard.setGravity(Gravity.CENTER_VERTICAL);
+        todayCard.setBackground(Ui.ripple(Ui.surface, 24));
+        todayTile = ElementPanel.text(this, 24, 0xFF0B0E14, true);
+        todayTile.setGravity(Gravity.CENTER);
+        todayTile.setIncludeFontPadding(false);
+        todayCard.addView(todayTile, new LinearLayout.LayoutParams(Ui.dp(56), Ui.dp(56)));
+        LinearLayout tcol = new LinearLayout(this);
+        tcol.setOrientation(LinearLayout.VERTICAL);
+        tcol.setPadding(Ui.dp(14), 0, 0, 0);
+        todayTitle = ElementPanel.text(this, 16, Ui.onSurface, true);
+        todayNote = ElementPanel.text(this, 13, Ui.onSurfaceVar, false);
+        todayNote.setMaxLines(2);
+        todayNote.setEllipsize(TextUtils.TruncateAt.END);
+        todayNote.setLineSpacing(0, 1.15f);
+        tcol.addView(todayTitle);
+        tcol.addView(todayNote);
+        todayCard.addView(tcol, new LinearLayout.LayoutParams(0, -2, 1f));
+        todayCard.setOnClickListener(v -> { Ui.tap(v); select(today); });
+        Ui.pressable(todayCard);
+        homeCards.addView(todayCard);
+
+        // クイズ
+        LinearLayout q = card();
+        LinearLayout qhead = new LinearLayout(this);
+        qhead.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout qcol = new LinearLayout(this);
+        qcol.setOrientation(LinearLayout.VERTICAL);
+        qcol.addView(ElementPanel.text(this, 16, Ui.onSurface, true, "位置当てクイズ"));
+        quizBest = ElementPanel.text(this, 13, Ui.onSurfaceVar, false);
+        qcol.addView(quizBest);
+        qhead.addView(qcol, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView start = pillButton("スタート", true);
+        start.setOnClickListener(v -> { Ui.confirm(v); startQuiz(); });
+        qhead.addView(start, new LinearLayout.LayoutParams(-2, Ui.dp(44)));
+        q.addView(qhead);
+        poolRow = new LinearLayout(this);
+        poolRow.setBackground(Ui.round(Ui.surfaceHigh, 18));
+        poolRow.setPadding(Ui.dp(3), Ui.dp(3), Ui.dp(3), Ui.dp(3));
+        for (int i = 0; i < Quiz.POOLS.length; i++) {
+            final int p = i;
+            TextView t = ElementPanel.text(this, 12, Ui.onSurfaceVar, true, Quiz.POOLS[i]);
+            t.setGravity(Gravity.CENTER);
+            t.setOnClickListener(v -> { Ui.tick(v); quiz.setPool(p); stylePools(); });
+            poolRow.addView(t, new LinearLayout.LayoutParams(0, Ui.dp(30), 1f));
+        }
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(-1, -2);
+        plp.topMargin = Ui.dp(12);
+        q.addView(poolRow, plp);
+        homeCards.addView(q);
+        stylePools();
+
+        // 暗記カード
+        LinearLayout tips = card();
+        tips.addView(ElementPanel.text(this, 12, Ui.onSurfaceVar, true, "語呂（1〜20番）"));
+        TextView goro = ElementPanel.text(this, 14, Ui.onSurface, false,
+                "水兵リーベ僕の船　七曲がるシップスクラークか\nH He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca");
+        goro.setLineSpacing(0, 1.25f);
+        goro.setPadding(0, Ui.dp(2), 0, Ui.dp(10));
+        tips.addView(goro);
+        tips.addView(ElementPanel.text(this, 12, Ui.onSurfaceVar, true, "炎色反応"));
+        SpannableStringBuilder fl = new SpannableStringBuilder();
+        for (Object[] f : Quiz.FLAME) {
+            Element e = elements.get((int) f[0] - 1);
+            int st = fl.length();
+            fl.append("●");
+            fl.setSpan(new ForegroundColorSpan((int) f[2]), st, fl.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            fl.append("⁠").append(e.symbol).append(" ").append((String) f[1]).append("　 ");
+        }
+        TextView flame = ElementPanel.text(this, 14, Ui.onSurface, false, fl);
+        flame.setLineSpacing(0, 1.3f);
+        flame.setPadding(0, Ui.dp(2), 0, 0);
+        tips.addView(flame);
+        homeCards.addView(tips);
+    }
+
+    private void stylePools() {
+        for (int i = 0; i < poolRow.getChildCount(); i++) {
+            TextView t = (TextView) poolRow.getChildAt(i);
+            boolean on = i == quiz.pool;
+            t.setBackground(on ? Ui.round(Ui.over(Ui.accent, Ui.surfaceHigh, 0.28f), 15) : Ui.ripple(0x00000000, 15));
+            t.setTextColor(on ? Ui.onSurface : Ui.onSurfaceVar);
+        }
+        int best = quiz.best();
+        quizBest.setText(best > 0 ? "最高 " + best + " 連続正解（" + Quiz.POOLS[quiz.pool] + "）" : "記号を隠した表で、場所を答える");
+    }
+
+    private void bindToday() {
+        List<Element> pool = new ArrayList<>();
+        for (Element e : elements) if (!e.note.isEmpty()) pool.add(e);
+        Calendar c = Calendar.getInstance();
+        Element t = pool.get((c.get(Calendar.YEAR) * 366 + c.get(Calendar.DAY_OF_YEAR)) % pool.size());
+        if (t == today) return;
+        today = t;
+        int color = PeriodicTableView.categoryColor(t.category);
+        todayTile.setBackground(Ui.round(color, 18));
+        todayTile.setTextColor(Ui.isLight(color) ? 0xFF0B0E14 : 0xFFFFFFFF);
+        todayTile.setText(t.symbol);
+        SpannableStringBuilder sb = new SpannableStringBuilder("今日の元素  ");
+        sb.setSpan(new ForegroundColorSpan(Ui.onSurfaceVar), 0, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.setSpan(new RelativeSizeSpan(0.78f), 0, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.setSpan(new StyleSpan(Typeface.NORMAL), 0, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.append(t.ja);
+        todayTitle.setText(sb);
+        todayNote.setText(t.note);
+    }
+
+    // ---------------------------------------------------------------- クイズのパネル
+
+    private void buildQuizPanel() {
+        quizPanel = new LinearLayout(this);
+        quizPanel.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout q = card();
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        quizStats = ElementPanel.text(this, 13, Ui.onSurfaceVar, false);
+        top.addView(quizStats, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView end = ElementPanel.text(this, 13, Ui.accent, true, "終了");
+        end.setGravity(Gravity.CENTER);
+        end.setBackground(Ui.ripple(Ui.surfaceHigh, 16));
+        end.setOnClickListener(v -> { Ui.tap(v); showHome(true); });
+        top.addView(end, new LinearLayout.LayoutParams(Ui.dp(64), Ui.dp(32)));
+        q.addView(top);
+        quizQuestion = ElementPanel.text(this, 20, Ui.onSurface, false);
+        quizQuestion.setPadding(0, Ui.dp(6), 0, Ui.dp(2));
+        q.addView(quizQuestion);
+        quizHint = ElementPanel.text(this, 13, Ui.onSurfaceVar, false, "記号と番号は隠してある。族と周期から場所を割り出せ。");
+        q.addView(quizHint);
+        quizPanel.addView(q);
+
+        quizFeedback = card();
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        quizResult = ElementPanel.text(this, 16, Ui.GOOD, true);
+        row.addView(quizResult, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView next = pillButton("次へ", true);
+        next.setOnClickListener(v -> { Ui.tap(v); nextQuestion(); });
+        row.addView(next, new LinearLayout.LayoutParams(-2, Ui.dp(44)));
+        quizFeedback.addView(row);
+        quizElementPanel = new ElementPanel(this);
+        quizElementPanel.setPadding(0, Ui.dp(12), 0, 0);
+        quizFeedback.addView(quizElementPanel);
+        quizPanel.addView(quizFeedback);
+    }
+
+    // ================================================================ 画面の切り替え
+
+    private void swap(View show, boolean animate) {
+        for (View v : new View[]{homeCards, elementPanel, quizPanel}) {
+            v.animate().cancel();
+            v.setVisibility(v == show ? View.VISIBLE : View.GONE);
+        }
+        panelScroll.scrollTo(0, 0);
+        if (animate) enter(show);
+        else { show.setAlpha(1f); show.setTranslationY(0); }
+    }
+
+    /** 下から少し浮き上がりながら現れる。 */
+    private void enter(View v) {
+        v.animate().cancel();
+        v.setAlpha(0f);
+        v.setTranslationY(Ui.dpf(18));
+        v.animate().alpha(1f).translationY(0).setDuration(300).setInterpolator(Ui.EASE_OUT).start();
+    }
+
+    private void setChrome(boolean visible) {
+        int vis = visible ? View.VISIBLE : View.GONE;
+        modeBar.setVisibility(vis);
+        legendScroll.setVisibility(vis);
+    }
+
+    private void showHome(boolean animate) {
+        quizOn = false;
+        table.setQuizMode(false);
+        table.setSelected(null);
+        setChrome(true);
+        bindToday();
+        stylePools();
+        swap(homeCards, animate);
+    }
+
+    private void select(Element e) {
+        boolean wasShown = elementPanel.getVisibility() == View.VISIBLE;
+        table.setSelected(e);
+        elementPanel.bind(e);
+        if (wasShown) {
+            panelScroll.smoothScrollTo(0, 0);
+            elementPanel.animate().cancel();
+            elementPanel.setAlpha(0.35f);
+            elementPanel.setTranslationY(Ui.dpf(8));
+            elementPanel.animate().alpha(1f).translationY(0).setDuration(220).setInterpolator(Ui.EASE_OUT).start();
+        } else {
+            swap(elementPanel, true);
+        }
+    }
+
+    // ================================================================ 周期表からの通知
+
+    @Override
+    public void onScrub(Element e, float cx, float top) {
+        if (e == null) { magnifier.hide(); return; }
+        int[] a = new int[2], b = new int[2];
+        table.getLocationInWindow(a);
+        magnifier.getLocationInWindow(b);
+        magnifier.show(e, a[0] - b[0] + cx, a[1] - b[1] + top, quizOn && !answered);
+    }
+
+    @Override
+    public void onScrubEnd() { magnifier.hide(); }
+
+    @Override
+    public void onElementTap(Element e) {
+        if (quizOn) {
+            if (!answered) answer(e);
+            return;
+        }
+        Ui.tap(table);
+        select(e);
+    }
+
+    // ================================================================ クイズ
+
+    private void startQuiz() {
+        quizOn = true;
+        quiz.start();
+        filter = null;
+        table.setMode(PeriodicTableView.MODE_CATEGORY);
+        table.setFilter(null);
+        styleModeBar();
+        rebuildLegend();
+        table.setSelected(null);
+        table.setQuizMode(true);
+        setChrome(false);
+        swap(quizPanel, true);
+        nextQuestion();
+    }
+
+    private void nextQuestion() {
+        answered = false;
+        table.flash(null, null);
+        Quiz.Question q = quiz.next();
+        SpannableStringBuilder sb = new SpannableStringBuilder(q.lead);
+        int st = sb.length();
+        sb.append(q.key);
+        sb.setSpan(new StyleSpan(Typeface.BOLD), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.setSpan(new RelativeSizeSpan(1.35f), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.setSpan(new ForegroundColorSpan(Ui.accent), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.append(q.tail);
+        quizQuestion.setText(sb);
+        quizHint.setVisibility(View.VISIBLE);
+        quizFeedback.setVisibility(View.GONE);
+        panelScroll.scrollTo(0, 0);
+        enter(quizQuestion);
+        renderStats();
+    }
+
+    private void renderStats() {
+        quizStats.setText(Quiz.POOLS[quiz.pool] + " ・ 連続 " + quiz.streak + " ・ 最高 " + quiz.best()
+                + " ・ 正答 " + quiz.correct + "/" + quiz.asked);
+    }
+
+    private void answer(Element tapped) {
+        answered = true;
+        Element target = quiz.current.answer;
+        boolean ok = quiz.answer(tapped);
+        table.flash(target, ok ? null : tapped);
+        renderStats();
+        quizHint.setVisibility(View.GONE);
+        if (ok) {
+            Ui.confirm(table);
+            quizResult.setTextColor(Ui.GOOD);
+            quizResult.setText("正解");
+        } else {
+            Ui.reject(table);
+            quizResult.setTextColor(Ui.BAD);
+            quizResult.setText("不正解。そこは " + tapped.ja + "（" + tapped.symbol + "）");
+            // 表を左右に振る
+            float d = Ui.dpf(1);
+            android.animation.ObjectAnimator shake = android.animation.ObjectAnimator.ofFloat(table, "translationX",
+                    0, 12 * d, -10 * d, 7 * d, -4 * d, 2 * d, 0);
+            shake.setDuration(420);
+            shake.start();
+        }
+        quizElementPanel.bind(target);
+        quizFeedback.setVisibility(View.VISIBLE);
+        enter(quizFeedback);
+    }
+
+    // ================================================================ ドック
+
+    /** 初回だけ、電話・メッセージ・ブラウザ・カメラをドックに入れておく。 */
+    private void initDefaultDock() {
+        if (prefs.getBoolean("dock_init", false)) return;
+        prefs.edit().putBoolean("dock_init", true).apply();
+        PackageManager pm = getPackageManager();
+        Intent[] intents = {
+                new Intent(Intent.ACTION_DIAL),
+                new Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:")),
+                new Intent(Intent.ACTION_VIEW, Uri.parse("https://www.example.com")),
+                new Intent(MediaStore.ACTION_IMAGE_CAPTURE)};
+        for (Intent i : intents) {
+            try {
+                ResolveInfo ri = pm.resolveActivity(i, PackageManager.MATCH_DEFAULT_ONLY);
+                if (ri == null || ri.activityInfo == null || "android".equals(ri.activityInfo.packageName)) continue;
+                Intent launch = pm.getLaunchIntentForPackage(ri.activityInfo.packageName);
+                if (launch != null && launch.getComponent() != null) Dock.add(this, launch.getComponent());
+            } catch (Exception ignored) {
+                // 見つからないものは入れない
+            }
+        }
     }
 
     private void rebuildDock() {
         dock.removeAllViews();
         PackageManager pm = getPackageManager();
+        int count = 0;
         for (ComponentName cn : Dock.get(this)) {
             ImageView iv = new ImageView(this);
             try {
@@ -226,256 +691,107 @@ public class MainActivity extends Activity implements PeriodicTableView.OnElemen
                 Dock.remove(this, cn); // アンインストール済み
                 continue;
             }
-            iv.setPadding(px(6), px(6), px(6), px(6));
-            iv.setOnClickListener(v -> launch(cn));
+            iv.setPadding(Ui.dp(4), Ui.dp(4), Ui.dp(4), Ui.dp(4));
+            iv.setOnClickListener(v -> { Ui.tap(v); AppDrawer.start(this, cn, v); });
             iv.setOnLongClickListener(v -> {
-                Dock.remove(this, cn);
-                rebuildDock();
-                Toast.makeText(this, "ドックから外した", Toast.LENGTH_SHORT).show();
+                Ui.heavy(v);
+                PopupMenu m = new PopupMenu(this, v);
+                m.getMenu().add("ドックから外す");
+                m.setOnMenuItemClickListener(item -> { Dock.remove(this, cn); rebuildDock(); return true; });
+                m.show();
                 return true;
             });
-            dock.addView(iv, new LinearLayout.LayoutParams(px(52), px(52)));
+            Ui.pressable(iv);
+            dock.addView(iv, new LinearLayout.LayoutParams(0, Ui.dp(56), 1f));
+            count++;
         }
-        View spacer = new View(this);
-        dock.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
-        if (quizButton.getParent() != null) ((LinearLayout) quizButton.getParent()).removeView(quizButton);
-        dock.addView(quizButton);
-        Button apps = smallButton("アプリ");
-        apps.setOnClickListener(v -> startActivity(new Intent(this, AppsActivity.class)));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-        lp.leftMargin = px(8);
-        dock.addView(apps, lp);
+        if (count == 0) {
+            TextView hint = ElementPanel.text(this, 13, Ui.onSurfaceVar, false, "上にスワイプでアプリ一覧。長押しでここに追加");
+            hint.setPadding(Ui.dp(10), 0, 0, 0);
+            dock.addView(hint, new LinearLayout.LayoutParams(0, -2, 1f));
+        }
+        View apps = new AppsIcon(this);
+        apps.setBackground(Ui.ripple(Ui.surfaceHigh, 24));
+        apps.setContentDescription("アプリ一覧");
+        apps.setOnClickListener(v -> { Ui.tap(v); drawer.open(false); });
+        apps.setOnLongClickListener(v -> { Ui.heavy(v); drawer.open(true); return true; });
+        Ui.pressable(apps);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(Ui.dp(48), Ui.dp(48));
+        alp.leftMargin = Ui.dp(6);
+        dock.addView(apps, alp);
     }
 
-    private void launch(ComponentName cn) {
-        try {
-            startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                    .setComponent(cn)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED));
-        } catch (Exception e) {
-            Toast.makeText(this, "起動できない", Toast.LENGTH_SHORT).show();
+    /** 3×3 の点で描く「アプリ一覧」アイコン。 */
+    private static final class AppsIcon extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        AppsIcon(Context c) { super(c); }
+        @Override protected void onDraw(Canvas canvas) {
+            p.setColor(Ui.onSurface);
+            float cx = getWidth() / 2f, cy = getHeight() / 2f, s = Ui.dpf(7);
+            for (int i = -1; i <= 1; i++)
+                for (int j = -1; j <= 1; j++) canvas.drawCircle(cx + i * s, cy + j * s, Ui.dpf(2.1f), p);
         }
     }
 
-    // ---------------------------------------------------------- 学習
+    // ================================================================ ドロワー連動
 
-    private void showWelcome() {
-        SpannableStringBuilder sb = new SpannableStringBuilder();
-        bold(sb, "元素をタップ", 1.2f);
-        sb.append("\n性質・電子配置・入試ポイントを表示する。\n\n");
-        bold(sb, "語呂（1〜20）", 1f);
-        sb.append("\n水兵リーベ僕の船　七曲がるシップスクラークか\nH He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca\n\n");
-        bold(sb, "炎色反応", 1f);
-        sb.append("\nLi 赤／Na 黄／K 赤紫／Ca 橙赤／Sr 紅／Ba 黄緑／Cu 青緑\n\n");
-        sb.append("「クイズ」で位置当て練習。ミスした元素ほど多く出題される。\n");
-        sb.append("アプリ一覧で長押し→ドックに追加。時計を長押し→ホームアプリ設定。");
-        detail.setText(sb);
-    }
-
-    private static void bold(SpannableStringBuilder sb, String s, float size) {
-        int st = sb.length();
-        sb.append(s);
-        sb.setSpan(new StyleSpan(Typeface.BOLD), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        if (size != 1f) sb.setSpan(new RelativeSizeSpan(size), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-    }
-
-    private void showDetail(Element e) {
-        SpannableStringBuilder sb = new SpannableStringBuilder();
-        int st = sb.length();
-        sb.append(e.symbol);
-        sb.setSpan(new RelativeSizeSpan(2.2f), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        sb.setSpan(new StyleSpan(Typeface.BOLD), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        sb.setSpan(new ForegroundColorSpan(PeriodicTableView.categoryColor(e.category)), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        sb.append("  ");
-        bold(sb, e.ja, 1.3f);
-        sb.append("  ").append(e.en).append('\n');
-
-        row(sb, "原子番号", String.valueOf(e.number));
-        row(sb, "原子量", e.mass);
-        row(sb, "位置", "第" + e.period + "周期・" + e.group + "族");
-        row(sb, "分類", e.categoryJa());
-        row(sb, "電子殻", e.shellsText());
-        int v = e.valenceElectrons();
-        if (v >= 0) row(sb, "価電子", v + "個");
-        row(sb, "電子配置", e.config);
-        row(sb, "電気陰性度", Double.isNaN(e.electronegativity) ? "—" : String.format(Locale.ROOT, "%.2f（ポーリング）", e.electronegativity));
-        row(sb, "常温の状態", e.phase);
-        if (!e.note.isEmpty()) {
-            sb.append('\n');
-            int s2 = sb.length();
-            sb.append("入試ポイント\n");
-            sb.setSpan(new ForegroundColorSpan(0xFFFFD54F), s2, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            sb.setSpan(new StyleSpan(Typeface.BOLD), s2, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            sb.append(e.note);
-        }
-        detail.setText(sb);
-    }
-
-    private static void row(SpannableStringBuilder sb, String k, String v) {
-        int st = sb.length();
-        sb.append(k).append("　");
-        sb.setSpan(new ForegroundColorSpan(FG2), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        sb.append(v).append('\n');
+    @Override
+    public void onProgress(float p) {
+        // 一覧が上がるほどホームは奥に引いて暗くなる
+        home.setScaleX(1f - 0.06f * p);
+        home.setScaleY(1f - 0.06f * p);
+        home.setAlpha(1f - 0.75f * p);
     }
 
     @Override
-    public void onElementTap(Element e) {
-        if (quiz) {
-            answer(e);
-            return;
-        }
-        table.setSelected(e);
-        showDetail(e);
-    }
+    public void onDockChanged() { rebuildDock(); }
 
-    // ---------------------------------------------------------- クイズ
-
-    private void setQuiz(boolean on) {
-        quiz = on;
-        handler.removeCallbacksAndMessages(null);
-        table.setQuizMode(on);
-        table.setSelected(null);
-        quizBar.setVisibility(on ? View.VISIBLE : View.GONE);
-        quizButton.setText(on ? "クイズ終了" : "クイズ");
-        if (on) {
-            streak = 0;
-            nextQuestion();
-        } else {
-            showWelcome();
-        }
-    }
-
-    private void updatePoolButton() { poolButton.setText(POOL_NAMES[pool]); }
-
-    private List<Element> poolElements() {
-        List<Element> l = new ArrayList<>();
-        for (Element e : elements) {
-            boolean in;
-            if (pool == 0) in = e.number <= 20;
-            else if (pool == 1) {
-                in = e.number <= 36;
-                for (int n : FREQUENT_EXTRA) if (n == e.number) in = true;
-            } else in = true;
-            if (in) l.add(e);
-        }
-        return l;
-    }
-
-    private int misses(Element e) { return prefs.getInt("miss_" + e.number, 0); }
-
-    private void nextQuestion() {
-        answering = false;
-        table.flash(null, null);
-        List<Element> l = poolElements();
-        // ミスが多い元素ほど出やすい重み付き抽選（同じ元素の連続は避ける）
-        int total = 0;
-        int[] w = new int[l.size()];
-        for (int i = 0; i < w.length; i++) {
-            w[i] = l.get(i) == target ? 0 : 1 + 3 * Math.min(misses(l.get(i)), 5);
-            total += w[i];
-        }
-        int r = random.nextInt(total);
-        for (int i = 0; i < w.length; i++) {
-            r -= w[i];
-            if (r < 0) { target = l.get(i); break; }
-        }
-        renderQuestion();
-        detail.setText("記号と番号は隠してある。位置で答えろ。\n族と周期を数えて場所を特定すること。");
-    }
-
-    private void renderQuestion() {
-        int best = prefs.getInt("best_" + pool, 0);
-        SpannableStringBuilder sb = new SpannableStringBuilder("Q. ");
-        bold(sb, target.ja, 1.25f);
-        sb.append(" はどこ？\n");
-        int st = sb.length();
-        sb.append("連続正解 ").append(String.valueOf(streak)).append("（最高 ").append(String.valueOf(best)).append("）");
-        sb.setSpan(new ForegroundColorSpan(FG2), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        sb.setSpan(new RelativeSizeSpan(0.75f), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        quizText.setText(sb);
-    }
-
-    private void answer(Element tapped) {
-        if (answering) return;
-        answering = true;
-        SharedPreferences.Editor ed = prefs.edit();
-        boolean ok = tapped == target;
-        if (ok) {
-            streak++;
-            if (streak > prefs.getInt("best_" + pool, 0)) ed.putInt("best_" + pool, streak);
-            ed.putInt("miss_" + target.number, Math.max(0, misses(target) - 1));
-            table.flash(target, null);
-        } else {
-            streak = 0;
-            ed.putInt("miss_" + target.number, misses(target) + 1);
-            table.flash(target, tapped);
-        }
-        ed.apply();
-        renderQuestion();
-        showDetail(target);
-        if (!ok) {
-            SpannableStringBuilder sb = new SpannableStringBuilder();
-            int st = sb.length();
-            sb.append("✗ そこは ").append(tapped.ja).append("（").append(tapped.symbol).append("）。正解は緑。\n\n");
-            sb.setSpan(new ForegroundColorSpan(0xFFEF9A9A), st, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            sb.append(detail.getText());
-            detail.setText(sb);
-        }
-        handler.postDelayed(this::nextQuestion, ok ? 900 : 3500);
-    }
-
-    // ---------------------------------------------------------- 夜間
+    // ================================================================ 夜間
 
     private void updateNight() {
         int h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
         boolean night = h >= 23 || h < 5;
-        if (night) {
-            nightBanner.setText("23時を過ぎた。スマホを置いて寝ろ。覚えた内容は睡眠中に定着する。");
-            nightBanner.setVisibility(View.VISIBLE);
-        } else {
-            nightBanner.setVisibility(View.GONE);
-        }
-        table.setDim(night ? 0.55f : 1f);
+        nightCard.setVisibility(night ? View.VISIBLE : View.GONE);
+        table.setDim(night ? 0.6f : 1f);
+        if (!quizOn && homeCards.getVisibility() == View.VISIBLE) bindToday();
     }
 
-    // ---------------------------------------------------------- ライフサイクル
+    // ================================================================ ライフサイクル
 
     @Override
     protected void onResume() {
         super.onResume();
         rebuildDock();
         updateNight();
-        registerReceiver(tick, new IntentFilter(Intent.ACTION_TIME_TICK));
+        register(tick, new IntentFilter(Intent.ACTION_TIME_TICK));
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        try { unregisterReceiver(tick); } catch (IllegalArgumentException ignored) {}
+        try { unregisterReceiver(tick); } catch (IllegalArgumentException ignored) { /* 未登録 */ }
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        // ホームボタン再押下で先頭へ
-        if (scroll != null) scroll.smoothScrollTo(0, 0);
+        // ホームボタン: 一覧を閉じ、詳細を開いていれば最初の状態へ
+        if (drawer.isOpen()) drawer.close(true);
+        else if (!quizOn && elementPanel.getVisibility() == View.VISIBLE) showHome(true);
+        else panelScroll.smoothScrollTo(0, 0);
     }
 
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        // ランチャーなので終了しない。クイズ中なら終了、選択中なら解除。
-        if (quiz) setQuiz(false);
-        else {
-            table.setSelected(null);
-            showWelcome();
-            scroll.smoothScrollTo(0, 0);
-        }
+        // ランチャーなので終了しない
+        if (drawer.isOpen()) drawer.close(true);
+        else if (quizOn || elementPanel.getVisibility() == View.VISIBLE) showHome(true);
     }
 
     @Override
     protected void onDestroy() {
-        handler.removeCallbacksAndMessages(null);
+        try { unregisterReceiver(packages); } catch (IllegalArgumentException ignored) { /* 未登録 */ }
         super.onDestroy();
     }
 }

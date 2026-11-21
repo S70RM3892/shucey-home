@@ -106,6 +106,13 @@ def main(src, dst):
         phase = {"Gas": "気体", "Liquid": "液体", "Solid": "固体"}[e["phase"]]
         if n >= 100:
             phase = "不明"
+        # 第一イオン化エネルギー [kJ/mol]、融点・沸点 [°C]（超重元素の予測値と He の加圧下融点は載せない）
+        ies = e["ionization_energies"]
+        ie = round(ies[0]) if ies else None
+        def celsius(k):
+            return None if (k is None or n >= 100) else round(k - 273.15)
+        mp = None if n == 2 else celsius(e["melt"])
+        bp = celsius(e["boil"])
         out.append({
             "n": n, "s": e["symbol"], "ja": JA[n - 1], "en": e["name"],
             "m": fmt_mass(n, e["atomic_mass"]),
@@ -116,6 +123,7 @@ def main(src, dst):
             "sh": e["shells"],
             "en_p": e["electronegativity_pauling"],
             "ph": phase,
+            "ie": ie, "mp": mp, "bp": bp,
             "note": NOTE.get(n, ""),
         })
     assert len(out) == 118
