@@ -50,6 +50,7 @@ public class AppField extends View {
     private String query = "";
     private float pitch, originX, originY, maxDist = 1f, reveal = 1f;
     private boolean placed;
+    private float scroll, maxScroll; // 入りきらない段を見せるための縦スクロール量
     private float labelAlpha = 1f; // なぞっている間は名前を消す（レンズで位置が動くため）
 
     // タッチ
@@ -63,7 +64,7 @@ public class AppField extends View {
         if (touching && !moved && focus != null && listener != null) {
             menuShown = true;
             Ui.heavy(this);
-            listener.onMenu(focus.app, focus.x, focus.y);
+            listener.onMenu(focus.app, focus.x, focus.y + scroll);
             endTouch();
         }
     };
@@ -118,6 +119,7 @@ public class AppField extends View {
         q = q.toLowerCase(Locale.ROOT).trim();
         if (q.equals(query)) return;
         query = q;
+        scroll = 0f;
         layoutNodes();
     }
 
@@ -126,6 +128,7 @@ public class AppField extends View {
     /** 0 = 閉、1 = 全開。起点から結晶が成長するように現れる。 */
     void setReveal(float r) {
         if (r == reveal) return;
+        if (r < 0.05f) scroll = 0f; // 開くたびに先頭（よく使う段）から
         reveal = r;
         invalidate();
     }
@@ -146,58 +149,70 @@ public class AppField extends View {
             n.on = query.isEmpty() || n.app.label.toLowerCase(Locale.ROOT).contains(query);
             if (n.on) shown.add(n);
         }
-        // 全部が収まる格子間隔を探す（大きいほど押しやすい）
-        List<float[]> slots = new ArrayList<>();
-        float d = Ui.dpf(72);
-        float min = Ui.dpf(44);
+        // 列数は画面幅から決め、段は下（親指側）から上へ埋める。偶数段と奇数段を半分ずらしてハニカムにする。
+        // 全部が見える範囲で間隔を詰め、それでも入らなければ上へ伸ばしてスクロールで見せる。
+        float side = Ui.dpf(10);
+        int cols = Math.max(4, (int) ((w - 2 * side) / Ui.dpf(74)));
+        float d, rowH;
+        int rows;
         while (true) {
-            slots.clear();
-            originX = w / 2f;
-            originY = h - d * 0.75f;
-            float rowH = d * 0.866f;
-            for (int j = 0; originY - j * rowH > d * 0.55f; j++) {
-                float off = (j % 2) * 0.5f;
-                for (int i = -40; i <= 40; i++) {
-                    float x = originX + (i + off) * d, y = originY - j * rowH;
-                    if (x < d * 0.55f || x > w - d * 0.55f) continue;
-                    slots.add(new float[]{x, y, (float) Math.hypot(x - originX, (y - originY) * 1.02f)});
-                }
-            }
-            if (slots.size() >= shown.size() || d <= min) break;
-            d -= Ui.dpf(2);
+            d = (w - 2 * side) / cols;
+            rowH = d * 0.92f;
+            rows = rowsFor(shown.size(), cols);
+            float need = Ui.dpf(8) + Math.min(Ui.dpf(48), d * 0.62f) + Ui.dpf(22) + (rows - 1) * rowH;
+            if (need <= h || d <= Ui.dpf(62)) break;
+            cols++;
         }
         pitch = d;
+        float icon = iconSize();
+        originX = w / 2f;
+        originY = h - icon / 2f - Ui.dpf(24);
+
         text.setTypeface(Typeface.DEFAULT);
         text.setTextSize(Ui.dpf(10.5f));
-        for (Node n : shown) n.shortLabel = TextUtils.ellipsize(n.app.label, text, d * 0.94f, TextUtils.TruncateAt.END);
-        slots.sort((p, q) -> Float.compare(p[2], q[2])); // 起点（親指）に近い順
+        int k = 0;
+        float minY = originY;
         maxDist = 1f;
-        for (int k = 0; k < shown.size(); k++) {
-            Node n = shown.get(k);
-            if (k < slots.size()) {
-                float[] s = slots.get(k);
-                n.bx = s[0];
-                n.by = s[1];
-                n.dist = s[2];
-                maxDist = Math.max(maxDist, s[2]);
-            } else {
-                n.on = false; // 入りきらない分は検索で呼び出す
+        for (int j = 0; k < shown.size(); j++) {
+            int count = j % 2 == 0 ? cols : cols - 1;
+            // 段の中では中央から外へ（よく使うものほど中央寄り）
+            for (int c = 0; c < count && k < shown.size(); c++) {
+                float off = count % 2 == 1
+                        ? (c % 2 == 0 ? 1 : -1) * ((c + 1) / 2)        // 0, -1, +1, -2, +2 …
+                        : (c % 2 == 0 ? 1 : -1) * (c / 2 + 0.5f);       // +0.5, -0.5, +1.5 …
+                Node n = shown.get(k++);
+                n.bx = originX + off * d;
+                n.by = originY - j * rowH;
+                n.dist = j * rowH + Math.abs(off) * d * 0.35f;
+                n.shortLabel = TextUtils.ellipsize(n.app.label, text, d * 0.96f, TextUtils.TruncateAt.END);
+                maxDist = Math.max(maxDist, n.dist);
+                minY = Math.min(minY, n.by);
+                if (!placed) { n.x = n.bx; n.y = n.by; n.a = 1f; }
             }
-            if (!placed) { n.x = n.bx; n.y = n.by; n.a = 1f; }
         }
-        for (int k = shown.size() - 1; k >= 0; k--) if (!shown.get(k).on) shown.remove(k);
+        maxScroll = Math.max(0f, Ui.dpf(8) + icon / 2f - minY);
+        scroll = Math.min(scroll, maxScroll);
         placed = true;
 
         // 隣り合う格子点を結ぶ「結合」
         bonds.clear();
-        for (int i = 0; i < shown.size(); i++) {
-            for (int j = i + 1; j < shown.size(); j++) {
-                Node p = shown.get(i), q = shown.get(j);
-                if (Math.hypot(p.bx - q.bx, p.by - q.by) < d * 1.05f) bonds.add(new int[]{i, j});
+        for (int a = 0; a < shown.size(); a++) {
+            for (int b = a + 1; b < shown.size(); b++) {
+                Node p = shown.get(a), q = shown.get(b);
+                if (Math.hypot(p.bx - q.bx, p.by - q.by) < d * 1.1f) bonds.add(new int[]{a, b});
             }
         }
         invalidate();
     }
+
+    private static int rowsFor(int n, int cols) {
+        int rows = 0;
+        for (int left = n; left > 0; rows++) left -= rows % 2 == 0 ? cols : cols - 1;
+        return Math.max(1, rows);
+    }
+
+    /** 上に隠れている段があるか（スクロールで出せる）。 */
+    boolean canScroll() { return maxScroll > 0f; }
 
     // ------------------------------------------------------------ 描画
 
@@ -205,10 +220,22 @@ public class AppField extends View {
     protected void onDraw(Canvas canvas) {
         boolean busy = false;
         float lens = pitch * 1.9f;
+        // なぞっている指が上端・下端に近づいたら自動で送る
+        if (touching && maxScroll > 0f) {
+            float edge = Ui.dpf(72), before = scroll;
+            if (fy < edge) scroll = Math.min(maxScroll, scroll + Ui.dpf(9) * (1f - Math.max(0f, fy) / edge));
+            else if (fy > getHeight() - edge) scroll = Math.max(0f, scroll - Ui.dpf(9) * (1f - Math.max(0f, getHeight() - fy) / edge));
+            if (scroll != before) {
+                busy = true;
+                Node n = nearest(fx, fy);
+                if (n != focus) { focus = n; if (n != null) Ui.tick(this); }
+            }
+        }
+        float fyc = fy - scroll; // 指の位置（中身の座標）
         for (Node n : nodes) {
             float tx = n.bx, ty = n.by, ts = 1f, ta = n.on ? 1f : 0f;
             if (touching && n.on) {
-                float vx = n.bx - fx, vy = n.by - fy;
+                float vx = n.bx - fx, vy = n.by - fyc;
                 float r = (float) Math.hypot(vx, vy);
                 float k = (float) Math.exp(-(r * r) / (lens * lens));
                 ts = 1f + 0.85f * k;
@@ -225,6 +252,8 @@ public class AppField extends View {
             if (Math.abs(tx - n.x) + Math.abs(ty - n.y) > 0.5f || Math.abs(ts - n.s) > 0.004f || Math.abs(ta - n.a) > 0.01f) busy = true;
         }
 
+        canvas.save();
+        canvas.translate(0, scroll);
         // 結合線
         line.setStrokeWidth(Ui.dpf(1.2f));
         for (int[] b : bonds) {
@@ -244,13 +273,20 @@ public class AppField extends View {
             paint.setColor(Ui.alpha(Ui.accent, 0.28f));
             canvas.drawCircle(focus.x, focus.y, base * focus.s * 0.72f, paint);
             drawNode(canvas, focus, base);
-            drawBubble(canvas, focus);
+        }
+        canvas.restore();
+        if (focus != null) drawBubble(canvas, focus);
+        if (scroll < maxScroll - 1f) { // まだ上に続きがある印
+            text.setTypeface(Typeface.DEFAULT);
+            text.setTextSize(Ui.dpf(11));
+            text.setColor(Ui.alpha(Ui.onSurfaceVar, 0.9f));
+            canvas.drawText("︿ 上の端で止めると続きが出る", getWidth() / 2f, Ui.dpf(14), text);
         }
         if (busy) postInvalidateOnAnimation();
     }
 
     /** 名前を下に書けるよう、格子間隔に対して小さめにする。 */
-    private float iconSize() { return Math.min(Ui.dpf(48), pitch * 0.62f); }
+    private float iconSize() { return Math.min(Ui.dpf(50), pitch * 0.62f); }
 
     /** 起点からの距離に応じて遅れて現れる（0..1）。 */
     private float appear(Node n) {
@@ -264,18 +300,32 @@ public class AppField extends View {
         if (alpha <= 0.01f) return;
         float pop = 1f - (1f - ap) * (1f - ap);
         float half = base * n.s * (0.4f + 0.6f * pop) * (0.6f + 0.4f * n.a) / 2f;
-        float lift = pitch >= Ui.dpf(58) ? Ui.dpf(5) * labelAlpha : 0f;
+        float lift = Ui.dpf(4);
         rect.set(n.x - half, n.y - half - lift, n.x + half, n.y + half - lift);
         paint.setAlpha((int) (255 * alpha));
         canvas.drawBitmap(n.bmp, null, rect, paint);
         paint.setAlpha(255);
         float la = alpha * labelAlpha * (n.on ? 1f : 0f);
-        if (la > 0.02f && n.shortLabel != null && pitch >= Ui.dpf(58)) {
+        if (la > 0.02f && n.shortLabel != null) {
             text.setTypeface(Typeface.DEFAULT);
             text.setTextSize(Ui.dpf(10.5f));
             text.setColor(Ui.alpha(Ui.onSurface, 0.85f * la));
-            canvas.drawText(n.shortLabel, 0, n.shortLabel.length(), n.x, n.y + base / 2f + Ui.dpf(7.5f), text);
+            canvas.drawText(n.shortLabel, 0, n.shortLabel.length(), n.x, n.y + base / 2f + Ui.dpf(9.5f), text);
+            drawBadge(canvas, n, half, lift);
+        } else {
+            drawBadge(canvas, n, half, lift);
         }
+    }
+
+    /** 通知のあるアプリに点を付ける。 */
+    private void drawBadge(Canvas canvas, Node n, float half, float lift) {
+        if (!n.on || !NotifyService.has(n.app.cn.getPackageName())) return;
+        float r = Math.max(Ui.dpf(4.5f), half * 0.24f);
+        float bx = n.x + half * 0.82f, by = n.y - half * 0.82f - lift;
+        paint.setColor(Ui.surface);
+        canvas.drawCircle(bx, by, r + Ui.dpf(2), paint);
+        paint.setColor(0xFFFF6B5E);
+        canvas.drawCircle(bx, by, r, paint);
     }
 
     private void drawBubble(Canvas canvas, Node n) {
@@ -303,7 +353,7 @@ public class AppField extends View {
         Node best = null;
         float bestD = pitch * 0.75f;
         for (Node n : shown) {
-            float d = (float) Math.hypot(n.bx - x, n.by - y);
+            float d = (float) Math.hypot(n.bx - x, n.by - (y - scroll));
             if (d < bestD) { bestD = d; best = n; }
         }
         return best;
@@ -330,7 +380,7 @@ public class AppField extends View {
     private void launch(Node n) {
         if (n == null || listener == null) return;
         int size = Math.round(iconSize());
-        listener.onLaunch(n.app, Math.round(n.bx - size / 2f), Math.round(n.by - size / 2f), size);
+        listener.onLaunch(n.app, Math.round(n.bx - size / 2f), Math.round(n.by + scroll - size / 2f), size);
     }
 
     /** 検索の先頭候補（起点に最も近いもの）を起動する。 */

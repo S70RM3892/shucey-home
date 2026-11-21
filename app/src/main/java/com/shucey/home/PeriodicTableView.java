@@ -219,7 +219,7 @@ public class PeriodicTableView extends View {
                     || (mode == MODE_PHASE ? filter.equals(e.phase) : filter.equals(e.category));
             toColor[i] = base;
             // ヒートマップは塗りを濃く、分類はやわらかく
-            toAlpha[i] = !match ? 0.10f : (isHeat() ? (base == NO_DATA ? 0.5f : 0.92f) : 0.34f);
+            toAlpha[i] = !match ? 0.10f : (isHeat() ? (base == NO_DATA ? 0.5f : 0.92f) : 0.44f);
         }
     }
 

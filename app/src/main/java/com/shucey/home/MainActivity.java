@@ -259,6 +259,25 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         date.setPadding(Ui.dp(2), Ui.dp(2), 0, 0);
         col.addView(date);
         header.addView(col, new LinearLayout.LayoutParams(0, -2, 1f));
+        // 時計 → 時計アプリ、日付 → カレンダー、下へスワイプ → 通知パネル
+        clock.setOnClickListener(v -> { Ui.tap(v); open(new Intent(android.provider.AlarmClock.ACTION_SHOW_ALARMS)); });
+        date.setOnClickListener(v -> { Ui.tap(v); open(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR)); });
+        View.OnTouchListener pull = new View.OnTouchListener() {
+            float downY;
+            boolean fired;
+            @Override public boolean onTouch(View v, android.view.MotionEvent ev) {
+                if (ev.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) { downY = ev.getRawY(); fired = false; }
+                else if (ev.getActionMasked() == android.view.MotionEvent.ACTION_MOVE && !fired && ev.getRawY() - downY > Ui.dpf(28)) {
+                    fired = true;
+                    v.cancelLongPress();
+                    v.setPressed(false);
+                    expandNotifications();
+                }
+                return fired;
+            }
+        };
+        clock.setOnTouchListener(pull);
+        date.setOnTouchListener(pull);
 
         TextView menu = ElementPanel.text(this, 22, Ui.onSurfaceVar, true, "⋮");
         menu.setGravity(Gravity.CENTER);
@@ -269,9 +288,11 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
             PopupMenu m = new PopupMenu(this, v);
             m.getMenu().add(0, 1, 0, "ホームアプリの設定");
             m.getMenu().add(0, 2, 1, "壁紙を変更");
+            m.getMenu().add(0, 3, 2, "通知バッジを使う（通知へのアクセスを許可）");
             m.setOnMenuItemClickListener(item -> {
                 try {
                     startActivity(item.getItemId() == 1 ? new Intent(Settings.ACTION_HOME_SETTINGS)
+                            : item.getItemId() == 3 ? new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
                             : Intent.createChooser(new Intent(Intent.ACTION_SET_WALLPAPER), "壁紙を変更"));
                 } catch (Exception ignored) {
                     // 対応する設定画面がない端末
@@ -281,6 +302,26 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
             m.show();
         });
         header.addView(menu, new LinearLayout.LayoutParams(Ui.dp(44), Ui.dp(44)));
+    }
+
+    private void open(Intent i) {
+        try {
+            startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            android.widget.Toast.makeText(this, "対応するアプリがない", android.widget.Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** 通知パネルを開く。公開 API が無いため、使えない端末では何もしない。 */
+    @android.annotation.SuppressLint({"WrongConstant", "PrivateApi"})
+    private void expandNotifications() {
+        try {
+            Object sb = getSystemService("statusbar");
+            Class.forName("android.app.StatusBarManager").getMethod("expandNotificationsPanel").invoke(sb);
+            Ui.tick(header);
+        } catch (Exception ignored) {
+            // 非対応端末
+        }
     }
 
     // ================================================================ 縦・横の配置
@@ -825,7 +866,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         PackageManager pm = getPackageManager();
         int count = 0;
         for (ComponentName cn : Dock.get(this)) {
-            ImageView iv = new ImageView(this);
+            ImageView iv = new BadgeIcon(this, cn.getPackageName());
             try {
                 iv.setImageDrawable(pm.getActivityIcon(cn));
             } catch (PackageManager.NameNotFoundException e) {
@@ -866,6 +907,22 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         dock.addView(apps, alp);
     }
 
+    /** 通知があるときに右上へ点を描くアイコン。 */
+    private static final class BadgeIcon extends ImageView {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final String pkg;
+        BadgeIcon(Context c, String pkg) { super(c); this.pkg = pkg; }
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            if (!NotifyService.has(pkg)) return;
+            float s = Math.min(getWidth(), getHeight()), cx = getWidth() / 2f + s * 0.32f, cy = getHeight() / 2f - s * 0.32f;
+            p.setColor(Ui.surface);
+            canvas.drawCircle(cx, cy, Ui.dpf(7), p);
+            p.setColor(0xFFFF6B5E);
+            canvas.drawCircle(cx, cy, Ui.dpf(5), p);
+        }
+    }
+
     /** 3×3 の点で描く「アプリ一覧」アイコン。 */
     private static final class AppsIcon extends View {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -898,6 +955,11 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
     @Override
     public void onDockChanged() { rebuildDock(); }
 
+    private void refreshBadges() {
+        for (int i = 0; i < dock.getChildCount(); i++) dock.getChildAt(i).invalidate();
+        drawer.invalidateField();
+    }
+
     // ================================================================ 夜間
 
     private void updateNight() {
@@ -914,6 +976,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
     protected void onResume() {
         super.onResume();
         Fx.setResumed(true);
+        NotifyService.setOnChange(() -> runOnUiThread(this::refreshBadges));
         kick(root);
         haveBase = false;
         if (gravity != null) sensors.registerListener(tiltListener, gravity, android.hardware.SensorManager.SENSOR_DELAY_GAME);
@@ -926,6 +989,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
     protected void onPause() {
         super.onPause();
         Fx.setResumed(false);
+        NotifyService.setOnChange(null);
         if (gravity != null) sensors.unregisterListener(tiltListener);
         table.setTilt(0, 0);
         try { unregisterReceiver(tick); } catch (IllegalArgumentException ignored) { /* 未登録 */ }

@@ -217,6 +217,35 @@ public class ScreenshotTest {
         assertEquals("Ba", table.getSelected().symbol);
         shot(root, "L2_detail.png");
 
+        // 横画面のアプリ一覧（高さが足りず上に続きがある → 端で自動スクロール）
+        AppDrawer drawer = find(root, AppDrawer.class);
+        Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        for (int i = 0; i < 60; i++) {
+            ResolveInfo ri = new ResolveInfo();
+            ri.activityInfo = new ActivityInfo();
+            ri.activityInfo.packageName = "com.example.land" + i;
+            ri.activityInfo.name = "Main";
+            ri.activityInfo.applicationInfo = new ApplicationInfo();
+            ri.activityInfo.applicationInfo.packageName = ri.activityInfo.packageName;
+            ri.nonLocalizedLabel = "アプリ" + i;
+            shadowOf(a.getPackageManager()).addResolveInfoForIntent(launcher, ri);
+        }
+        drawer.reload();
+        Thread.sleep(500);
+        drawer.open(false);
+        settle();
+        AppField field = find(root, AppField.class);
+        assertEquals(60, field.shownCount());
+        assertTrue("入りきらない分はスクロールで出せる", field.canScroll());
+        shot(root, "L4_drawer.png");
+        touch(field, MotionEvent.ACTION_DOWN, field.getWidth() / 2f, field.getHeight() / 2f);
+        touch(field, MotionEvent.ACTION_MOVE, field.getWidth() / 2f, Ui.dpf(10));
+        for (int i = 0; i < 60; i++) { field.invalidate(); shotFrame(field); }
+        shot(root, "L5_drawer_scrolled.png");
+        touch(field, MotionEvent.ACTION_CANCEL, 0, 0);
+        a.onBackPressed();
+        settle();
+
         // 回転しても状態を保ったまま並べ替わる
         RuntimeEnvironment.setQualifiers("w411dp-h891dp-port-xxhdpi");
         c.configurationChange(a.getResources().getConfiguration());

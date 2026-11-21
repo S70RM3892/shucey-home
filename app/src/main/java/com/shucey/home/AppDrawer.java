@@ -55,7 +55,7 @@ public class AppDrawer extends FrameLayout implements AppField.Listener {
     private final AppField field;
     private final View anchor;
     private final FrameLayout body;
-    private final TextView empty;
+    private final TextView empty, hint;
     private Listener listener;
     private boolean open, loading;
 
@@ -119,10 +119,16 @@ public class AppDrawer extends FrameLayout implements AppField.Listener {
         empty.setGravity(Gravity.CENTER);
         empty.setVisibility(GONE);
         body.addView(empty, new LayoutParams(-1, Ui.dp(120)));
+        // 最初の数回だけ操作のヒントを出す
+        hint = ElementPanel.text(c, 12, Ui.onSurfaceVar, false, "なぞって離すと起動 ・ 長押しでメニュー ・ 下へ払うと閉じる");
+        hint.setGravity(Gravity.CENTER);
+        hint.setPadding(0, Ui.dp(4), 0, 0);
+        sheet.addView(hint, new LinearLayout.LayoutParams(-1, -2));
         sheet.addView(body, new LinearLayout.LayoutParams(-1, 0, 1f));
     }
 
     void setListener(Listener l) { listener = l; }
+    void invalidateField() { field.invalidate(); }
     boolean isOpen() { return open; }
 
     /** システムバーやキーボードの分だけ内側に寄せる。 */
@@ -291,6 +297,10 @@ public class AppDrawer extends FrameLayout implements AppField.Listener {
         sheet.animate().cancel();
         if (getVisibility() != VISIBLE) {
             search.setText("");
+            android.content.SharedPreferences prefs = Dock.prefs(getContext());
+            int seen = prefs.getInt("drawer_opens", 0);
+            hint.setVisibility(seen < 5 ? VISIBLE : GONE);
+            prefs.edit().putInt("drawer_opens", seen + 1).apply();
             sheet.setTranslationY(closedY());
             setVisibility(VISIBLE);
         }

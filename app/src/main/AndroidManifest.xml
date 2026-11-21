@@ -4,6 +4,11 @@
     <!-- アプリ一覧からのアンインストール確認画面を開くため -->
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
+    <!-- 時計を下へスワイプして通知パネルを開くため -->
+    <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
+    <!-- 時計タップでアラーム一覧を開くため -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
     <!-- アプリ一覧の取得（Android 11+ のパッケージ可視性） -->
     <queries>
         <intent>
@@ -35,5 +40,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 通知バッジ用。利用者が設定で許可したときだけ有効になる -->
+        <service
+            android:name=".NotifyService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>
