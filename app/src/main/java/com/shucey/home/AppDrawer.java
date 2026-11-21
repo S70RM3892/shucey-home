@@ -11,21 +11,16 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.provider.Settings;
 import android.text.Editable;
-import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
-import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
-import android.widget.BaseAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.GridView;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.TextView;
@@ -39,7 +34,7 @@ import java.util.Locale;
 /**
  * 下から引き出すアプリ一覧。指に追従して開閉し、離した速度で開くか閉じるかを決める。
  */
-public class AppDrawer extends FrameLayout {
+public class AppDrawer extends FrameLayout implements AppField.Listener {
 
     interface Listener {
         /** 0 = 閉、1 = 全開。ホーム側の奥行き演出に使う。 */
@@ -55,11 +50,10 @@ public class AppDrawer extends FrameLayout {
     }
 
     private final List<App> all = new ArrayList<>();
-    private final List<App> shown = new ArrayList<>();
-    private final Adapter adapter = new Adapter();
     private final LinearLayout sheet;
     private final EditText search;
-    private final GridView grid;
+    private final AppField field;
+    private final View anchor;
     private final FrameLayout body;
     private final TextView empty;
     private Listener listener;
@@ -111,25 +105,16 @@ public class AppDrawer extends FrameLayout {
             public void afterTextChanged(Editable s) { filter(); }
         });
         search.setOnEditorActionListener((v, id, ev) -> {
-            if (!shown.isEmpty()) launch(shown.get(0), search); // 先頭の候補を起動
+            launchTop(); // 先頭の候補を起動
             return true;
         });
 
         body = new FrameLayout(c);
-        grid = new GridView(c);
-        grid.setNumColumns(GridView.AUTO_FIT);
-        grid.setColumnWidth(Ui.dp(84));
-        grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
-        grid.setVerticalSpacing(0);
-        grid.setPadding(Ui.dp(8), Ui.dp(8), Ui.dp(8), Ui.dp(24));
-        grid.setClipToPadding(false);
-        grid.setSelector(Ui.ripple(0x00000000, 18));
-        grid.setDrawSelectorOnTop(false);
-        grid.setVerticalScrollBarEnabled(false);
-        grid.setAdapter(adapter);
-        grid.setOnItemClickListener((p, v, pos, id) -> launch(shown.get(pos), v));
-        grid.setOnItemLongClickListener((p, v, pos, id) -> { showMenu(shown.get(pos), v); return true; });
-        body.addView(grid, new LayoutParams(-1, -1));
+        field = new AppField(c);
+        field.setListener(this);
+        body.addView(field, new LayoutParams(-1, -1));
+        anchor = new View(c); // 長押しメニューの出る位置
+        body.addView(anchor, new LayoutParams(1, 1));
         empty = ElementPanel.text(c, 14, Ui.onSurfaceVar, false, "該当するアプリがない");
         empty.setGravity(Gravity.CENTER);
         empty.setVisibility(GONE);
@@ -163,45 +148,97 @@ public class AppDrawer extends FrameLayout {
             }
             Collator col = Collator.getInstance(Locale.JAPANESE);
             list.sort((x, y) -> col.compare(x.label, y.label));
+            List<App> ordered = order(c, list);
             post(() -> {
                 loading = false;
                 all.clear();
-                all.addAll(list);
+                all.addAll(ordered);
+                field.setApps(all);
                 filter();
             });
         }, "apps").start();
     }
 
-    private void filter() {
-        shown.clear();
-        String q = search.getText().toString().toLowerCase(Locale.ROOT).trim();
-        for (App a : all) {
-            if (q.isEmpty() || a.label.toLowerCase(Locale.ROOT).contains(q)) shown.add(a);
+    /**
+     * よく使う順に並べる。ただし位置の記憶が崩れないよう、並びは 1 日単位で固定する
+     * （日付が変わったときだけ使用回数で並べ直す。新しく入ったアプリは末尾に足す）。
+     */
+    private static List<App> order(Context c, List<App> alpha) {
+        android.content.SharedPreferences prefs = Dock.prefs(c);
+        long day = System.currentTimeMillis() / 86400000L;
+        List<App> out = new ArrayList<>();
+        String saved = prefs.getString("order", "");
+        if (prefs.getLong("order_day", -1) == day && !saved.isEmpty()) {
+            for (String key : saved.split("\n")) {
+                for (App a : alpha) if (a.cn.flattenToString().equals(key)) { out.add(a); break; }
+            }
+            for (App a : alpha) if (!out.contains(a)) out.add(a);
+        } else {
+            out.addAll(alpha);
+            // 安定ソートなので、同じ回数なら名前順のまま
+            out.sort((x, y) -> Integer.compare(uses(prefs, y.cn), uses(prefs, x.cn)));
         }
-        empty.setVisibility(shown.isEmpty() && !all.isEmpty() ? VISIBLE : GONE);
-        adapter.notifyDataSetChanged();
+        StringBuilder sb = new StringBuilder();
+        for (App a : out) sb.append(a.cn.flattenToString()).append('\n');
+        prefs.edit().putString("order", sb.toString()).putLong("order_day", day).apply();
+        return out;
     }
 
-    static void start(Context c, ComponentName cn, View from) {
+    private static int uses(android.content.SharedPreferences prefs, ComponentName cn) {
+        return prefs.getInt("use_" + cn.flattenToString(), 0);
+    }
+
+    private void launchTop() { field.launchTop(); }
+
+    private void filter() {
+        field.setQuery(search.getText().toString());
+        empty.setVisibility(field.shownCount() == 0 && !all.isEmpty() ? VISIBLE : GONE);
+    }
+
+    /** from 内の矩形 (x, y, size) から広がるように起動し、使用回数を数える。 */
+    static void start(Context c, ComponentName cn, View from, int x, int y, int size) {
         try {
             Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(cn)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-            // アイコンの位置から広がるように起動する
             c.startActivity(i, from == null ? null
-                    : ActivityOptions.makeClipRevealAnimation(from, 0, 0, from.getWidth(), from.getHeight()).toBundle());
+                    : ActivityOptions.makeClipRevealAnimation(from, x, y, size, size).toBundle());
+            android.content.SharedPreferences prefs = Dock.prefs(c);
+            String key = "use_" + cn.flattenToString();
+            prefs.edit().putInt(key, prefs.getInt(key, 0) + 1).apply();
         } catch (Exception e) {
             Toast.makeText(c, "起動できない", Toast.LENGTH_SHORT).show();
         }
     }
 
-    private void launch(App a, View from) {
+    static void start(Context c, ComponentName cn, View from) {
+        start(c, cn, from, 0, 0, from == null ? 0 : from.getWidth());
+    }
+
+    // ---- AppField からの通知 ----
+
+    @Override
+    public void onLaunch(App a, int x, int y, int size) {
         Ui.tap(this);
-        start(getContext(), a.cn, from);
+        start(getContext(), a.cn, field, x, y, size);
         postDelayed(() -> close(false), 350); // 戻ってきたときはホームに
     }
 
+    @Override
+    public void onMenu(App a, float x, float y) {
+        anchor.setTranslationX(x);
+        anchor.setTranslationY(y);
+        showMenu(a, anchor);
+    }
+
+    @Override
+    public void onCloseRequest() { close(true); }
+
+    /** ドックからの一筆書きを一覧へ引き継ぐ。 */
+    void steer(float rawX, float rawY, boolean release, boolean deliberate) {
+        field.steer(rawX, rawY, release, deliberate);
+    }
+
     private void showMenu(App a, View anchor) {
-        Ui.heavy(this);
         Context c = getContext();
         boolean inDock = Dock.contains(c, a.cn);
         PopupMenu m = new PopupMenu(c, anchor, Gravity.CENTER_HORIZONTAL);
@@ -241,7 +278,12 @@ public class AppDrawer extends FrameLayout {
     private void applyTy(float ty) {
         ty = Math.max(0f, Math.min(closedY(), ty));
         sheet.setTranslationY(ty);
-        if (listener != null) listener.onProgress(1f - ty / closedY());
+        progress(1f - ty / closedY());
+    }
+
+    private void progress(float p) {
+        field.setReveal(p);
+        if (listener != null) listener.onProgress(p);
     }
 
     /** ドックからの引き上げ開始。 */
@@ -249,7 +291,6 @@ public class AppDrawer extends FrameLayout {
         sheet.animate().cancel();
         if (getVisibility() != VISIBLE) {
             search.setText("");
-            grid.setSelection(0);
             sheet.setTranslationY(closedY());
             setVisibility(VISIBLE);
         }
@@ -302,15 +343,15 @@ public class AppDrawer extends FrameLayout {
         float dist = Math.abs(target - sheet.getTranslationY());
         long ms = (long) Math.max(160, Math.min(420, 420 * dist / closedY() + 120 - Math.abs(velocityY) / Ui.dpf(40)));
         sheet.animate().translationY(target).setDuration(ms).setInterpolator(Ui.EASE_OUT)
-                .setUpdateListener(a -> { if (listener != null) listener.onProgress(1f - sheet.getTranslationY() / closedY()); })
+                .setUpdateListener(a -> progress(1f - sheet.getTranslationY() / closedY()))
                 .withEndAction(() -> {
-                    if (listener != null) listener.onProgress(toOpen ? 1f : 0f);
+                    progress(toOpen ? 1f : 0f);
                     if (!toOpen) setVisibility(INVISIBLE);
                 })
                 .start();
     }
 
-    // 一覧が先頭にあるとき（または検索欄より上）を下に引くと閉じる
+    // 検索欄より上を下に引くと閉じる（一覧の中では下へ強く払う）
     @Override
     public boolean onInterceptTouchEvent(MotionEvent ev) {
         switch (ev.getActionMasked()) {
@@ -322,7 +363,7 @@ public class AppDrawer extends FrameLayout {
             case MotionEvent.ACTION_MOVE: {
                 float dy = ev.getY() - downY, dx = ev.getX() - downX;
                 boolean onHeader = downY < body.getTop() + getPaddingTop();
-                if (dy > slop && dy > Math.abs(dx) * 1.3f && (onHeader || !grid.canScrollVertically(-1))) {
+                if (dy > slop && dy > Math.abs(dx) * 1.3f && onHeader) {
                     dragging = true;
                     startTy = sheet.getTranslationY();
                     downY = ev.getY();
@@ -354,36 +395,5 @@ public class AppDrawer extends FrameLayout {
                 break;
         }
         return true;
-    }
-
-    // ------------------------------------------------------------ 一覧
-
-    private class Adapter extends BaseAdapter {
-        public int getCount() { return shown.size(); }
-        public Object getItem(int i) { return shown.get(i); }
-        public long getItemId(int i) { return i; }
-
-        public View getView(int pos, View v, ViewGroup parent) {
-            LinearLayout cell = (LinearLayout) v;
-            if (cell == null) {
-                Context c = getContext();
-                cell = new LinearLayout(c);
-                cell.setOrientation(LinearLayout.VERTICAL);
-                cell.setGravity(Gravity.CENTER_HORIZONTAL);
-                cell.setPadding(Ui.dp(4), Ui.dp(10), Ui.dp(4), Ui.dp(8));
-                ImageView icon = new ImageView(c);
-                cell.addView(icon, new LinearLayout.LayoutParams(Ui.dp(54), Ui.dp(54)));
-                TextView label = ElementPanel.text(c, 12, Ui.onSurface, false);
-                label.setGravity(Gravity.CENTER_HORIZONTAL);
-                label.setLines(2);
-                label.setEllipsize(TextUtils.TruncateAt.END);
-                label.setPadding(0, Ui.dp(6), 0, 0);
-                cell.addView(label, new LinearLayout.LayoutParams(-1, -2));
-            }
-            App a = shown.get(pos);
-            ((ImageView) cell.getChildAt(0)).setImageDrawable(a.icon);
-            ((TextView) cell.getChildAt(1)).setText(a.label);
-            return cell;
-        }
     }
 }

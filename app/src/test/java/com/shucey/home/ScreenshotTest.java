@@ -84,7 +84,9 @@ public class ScreenshotTest {
     @Test
     public void screens() throws Exception {
         Context app = RuntimeEnvironment.getApplication();
-        String[] names = {"カメラ", "Chrome", "電卓", "マップ", "時計", "設定", "フォト", "YouTube", "連絡帳", "ファイル"};
+        String[] names = new String[46];
+        String[] baseNames = {"カメラ", "Chrome", "電卓", "マップ", "時計", "設定", "フォト", "YouTube", "連絡帳", "ファイル"};
+        for (int i = 0; i < names.length; i++) names[i] = i < baseNames.length ? baseNames[i] : "アプリ" + i;
         Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
         for (int i = 0; i < names.length; i++) {
             ResolveInfo ri = new ResolveInfo();
@@ -160,11 +162,42 @@ public class ScreenshotTest {
         drawer.open(false);
         settle();
         assertTrue(drawer.isOpen());
+        AppField field = find(root, AppField.class);
+        assertEquals(46, field.shownCount());
         shot(root, "8_drawer.png");
+
+        // なぞっている最中（魚眼レンズ）
+        float fx = field.getWidth() * 0.42f, fy = field.getHeight() - Ui.dpf(250);
+        touch(field, MotionEvent.ACTION_DOWN, fx - 60, fy + 40);
+        touch(field, MotionEvent.ACTION_MOVE, fx, fy);
+        for (int i = 0; i < 40; i++) { field.invalidate(); shotFrame(field); } // 追従アニメーションを進める
+        shot(root, "9_drawer_fisheye.png");
+        touch(field, MotionEvent.ACTION_UP, fx, fy);
+        settle();
+        Intent started = shadowOf(a).getNextStartedActivity();
+        assertNotNull("離したアプリが起動する", started);
+        assertTrue(started.getComponent().getPackageName().startsWith("com.example.app"));
+        assertFalse("起動後は一覧が閉じる", drawer.isOpen());
+
+        // 検索: 一致したものだけが並び直す
+        drawer.open(false);
+        settle();
+        find(drawer, android.widget.EditText.class).setText("アプリ1");
+        for (int i = 0; i < 40; i++) { field.invalidate(); shotFrame(field); }
+        assertEquals(10, field.shownCount()); // アプリ10〜19
+        shot(root, "10_drawer_search.png");
         a.onBackPressed();
         settle();
         assertFalse(drawer.isOpen());
         assertEquals(View.INVISIBLE, drawer.getVisibility());
+    }
+
+    /** 1 フレームぶん描画して、描画に連動するアニメーションを進める。 */
+    private static void shotFrame(View v) {
+        android.graphics.RenderNode node = new android.graphics.RenderNode("f");
+        node.setPosition(0, 0, v.getWidth(), v.getHeight());
+        v.draw(node.beginRecording());
+        node.endRecording();
     }
 
     @Test
