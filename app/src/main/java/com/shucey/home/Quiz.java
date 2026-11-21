@@ -17,6 +17,12 @@ final class Quiz {
             {3, "赤", 0xFFE53935}, {11, "黄", 0xFFFDD835}, {19, "赤紫", 0xFFC063C8}, {20, "橙赤", 0xFFFF7043},
             {38, "紅", 0xFFD81B60}, {56, "黄緑", 0xFF9CCC65}, {29, "青緑", 0xFF26C6A6}};
 
+    /** 炎色反応を示す元素なら {番号, 色名, 色}、なければ null。 */
+    static Object[] flame(int number) {
+        for (Object[] f : FLAME) if ((int) f[0] == number) return f;
+        return null;
+    }
+
     static final class Question {
         final Element answer;
         final String lead, key, tail; // 例: "", "マンガン", " はどこ？"

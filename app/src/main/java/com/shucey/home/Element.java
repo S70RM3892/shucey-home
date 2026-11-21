@@ -74,6 +74,24 @@ final class Element {
         return sb.toString();
     }
 
+    /** 最後に電子が入る軌道の種類: 0 = s, 1 = p, 2 = d, 3 = f（周期表のブロック）。 */
+    int block() {
+        if (category.equals("lanthanoid") || category.equals("actinoid")) return 3;
+        if (category.equals("transition")) return 2;
+        if (group <= 2 || number == 2) return 0;
+        return 1;
+    }
+
+    /** 「3d」のような軌道名。電子配置に該当の軌道がなければブロック名のみ。 */
+    String orbitalName() {
+        char letter = "spdf".charAt(block());
+        String found = null;
+        for (String tok : config.replace("（予測）", "").split(" ")) {
+            if (tok.length() >= 2 && tok.charAt(1) == letter && Character.isDigit(tok.charAt(0))) found = tok.substring(0, 2);
+        }
+        return found != null ? found : String.valueOf(letter);
+    }
+
     String categoryShort() {
         switch (category) {
             case "alkali": return "アルカリ金属";

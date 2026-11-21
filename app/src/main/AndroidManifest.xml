@@ -25,7 +25,7 @@
             android:clearTaskOnLaunch="true"
             android:stateNotNeeded="true"
             android:excludeFromRecents="true"
-            android:screenOrientation="portrait"
+            android:screenOrientation="fullUser"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:windowSoftInputMode="adjustResize|stateAlwaysHidden">
             <intent-filter>

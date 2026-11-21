@@ -79,7 +79,7 @@ public class AppDrawer extends FrameLayout {
         sheet = new LinearLayout(c);
         sheet.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Ui.alpha(Ui.surface, 0.97f));
+        bg.setColor(Ui.alpha(Ui.surface, android.os.Build.VERSION.SDK_INT >= 31 ? 0.80f : 0.97f));
         float r = Ui.dpf(28);
         bg.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
         sheet.setBackground(bg);

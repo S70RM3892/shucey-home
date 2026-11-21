@@ -103,8 +103,9 @@ public class ScreenshotTest {
         shot(root, "1_home.png");
 
         PeriodicTableView table = find(root, PeriodicTableView.class);
-        float cw = (table.getWidth() - Ui.dpf(8)) / 18f, ch = cw * 1.22f;
-        float feX = Ui.dpf(4) + 7.5f * cw, feY = Ui.dpf(4) + ch * 0.5f + 3.5f * ch;
+        List<Element> els = Element.load(a);
+        float cw = (table.getWidth() - Ui.dpf(8)) / 18f;
+        float feX = table.centerOf(els.get(25))[0], feY = table.centerOf(els.get(25))[1];
 
         // なぞっている最中（拡大表示）
         touch(table, MotionEvent.ACTION_DOWN, feX - cw, feY);
@@ -115,6 +116,17 @@ public class ScreenshotTest {
         settle();
         assertEquals("Fe", table.getSelected().symbol);
         shot(root, "3_detail.png");
+        float[] na = table.centerOf(els.get(10));
+        touch(table, MotionEvent.ACTION_DOWN, na[0], na[1]);
+        touch(table, MotionEvent.ACTION_UP, na[0], na[1]);
+        settle();
+        android.widget.ScrollView sv = find(root, android.widget.ScrollView.class);
+        sv.scrollTo(0, sv.getChildAt(0).getHeight());
+        assertTrue("詳細が下までスクロールできる", sv.getScrollY() > 0);
+        shot(find(root, ElementPanel.class), "3b_panel_na.png");
+        touch(table, MotionEvent.ACTION_DOWN, feX, feY);
+        touch(table, MotionEvent.ACTION_UP, feX, feY);
+        settle();
 
         click(root, "電気陰性度");
         settle();
@@ -133,7 +145,7 @@ public class ScreenshotTest {
         settle();
         shot(root, "6_quiz.png");
         // わざと外す（左上の H）。正解が H の場合は He を押す
-        float hX = Ui.dpf(4) + 0.5f * cw, hY = Ui.dpf(4) + ch;
+        float hX = table.centerOf(els.get(0))[0], hY = table.centerOf(els.get(0))[1];
         touch(table, MotionEvent.ACTION_DOWN, hX, hY);
         touch(table, MotionEvent.ACTION_UP, hX, hY);
         settle();
@@ -153,6 +165,32 @@ public class ScreenshotTest {
         settle();
         assertFalse(drawer.isOpen());
         assertEquals(View.INVISIBLE, drawer.getVisibility());
+    }
+
+    @Test
+    @Config(sdk = 34, qualifiers = "w891dp-h411dp-land-xxhdpi")
+    public void landscape() throws Exception {
+        org.robolectric.android.controller.ActivityController<MainActivity> c = Robolectric.buildActivity(MainActivity.class).setup();
+        MainActivity a = c.get();
+        View root = a.getWindow().getDecorView();
+        settle();
+        shot(root, "L1_home.png");
+        PeriodicTableView table = find(root, PeriodicTableView.class);
+        assertTrue("横画面で表が左側に収まる", table.getWidth() < root.getWidth() * 0.7f);
+        float[] ba = table.centerOf(Element.load(a).get(55)); // Ba
+        touch(table, MotionEvent.ACTION_DOWN, ba[0], ba[1]);
+        touch(table, MotionEvent.ACTION_UP, ba[0], ba[1]);
+        settle();
+        assertEquals("Ba", table.getSelected().symbol);
+        shot(root, "L2_detail.png");
+
+        // 回転しても状態を保ったまま並べ替わる
+        RuntimeEnvironment.setQualifiers("w411dp-h891dp-port-xxhdpi");
+        c.configurationChange(a.getResources().getConfiguration());
+        settle();
+        assertEquals("Ba", table.getSelected().symbol);
+        assertTrue(table.getWidth() > root.getWidth() * 0.9f);
+        shot(root, "L3_rotated_back.png");
     }
 
     private static void settle() {
@@ -197,11 +235,26 @@ public class ScreenshotTest {
         return null;
     }
 
-    private static void shot(View v, String name) throws Exception {
-        Bitmap b = Bitmap.createBitmap(v.getWidth(), v.getHeight(), Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(b);
+    /** 実機と同じハードウェア描画経路で撮る（GPU シェーダーも写る）。 */
+    static void shot(View v, String name) throws Exception {
+        int w = v.getWidth(), h = v.getHeight();
+        android.media.ImageReader reader = android.media.ImageReader.newInstance(w, h, android.graphics.PixelFormat.RGBA_8888, 1);
+        android.graphics.HardwareRenderer hr = new android.graphics.HardwareRenderer();
+        hr.setSurface(reader.getSurface());
+        android.graphics.RenderNode node = new android.graphics.RenderNode("shot");
+        node.setPosition(0, 0, w, h);
+        Canvas c = node.beginRecording();
         c.drawColor(0xFF2B3A55); // 壁紙の代わり
         v.draw(c);
+        node.endRecording();
+        hr.setContentRoot(node);
+        hr.createRenderRequest().syncAndDraw();
+        android.media.Image img = reader.acquireNextImage();
+        android.media.Image.Plane plane = img.getPlanes()[0];
+        Bitmap full = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), h, Bitmap.Config.ARGB_8888);
+        full.copyPixelsFromBuffer(plane.getBuffer());
+        img.close();
+        Bitmap b = Bitmap.createBitmap(full, 0, 0, w, h);
         File out = new File(System.getProperty("user.dir"), "build/shots/" + name);
         out.getParentFile().mkdirs();
         try (FileOutputStream fos = new FileOutputStream(out)) {

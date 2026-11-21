@@ -43,7 +43,9 @@ public class PeriodicTableView extends View {
     private int[] fromColor, toColor;
     private float[] fromAlpha, toAlpha;
     private float blend = 1f, appear = 1f, selectPop = 1f, flashT = 1f;
-    private ValueAnimator blendAnim, appearAnim, popAnim, flashAnim;
+    private ValueAnimator blendAnim, appearAnim, popAnim, flashAnim, waveAnim;
+    // タップ点から広がる波と、端末の傾きによる光沢
+    private float waveX, waveY, waveT = 1f, tiltX, tiltY;
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -58,6 +60,7 @@ public class PeriodicTableView extends View {
         text.setTextAlign(Paint.Align.CENTER);
         pad = Ui.dpf(4);
         setHapticFeedbackEnabled(true);
+        setCameraDistance(Ui.dpf(1) * 9000);
     }
 
     // ------------------------------------------------------------ 設定
@@ -115,6 +118,29 @@ public class PeriodicTableView extends View {
     void setDim(float d) {
         if (dim == d) return;
         dim = d;
+        invalidate();
+    }
+
+    /** 元素の位置から周囲へ波を伝える。 */
+    void wave(Element e) {
+        if (e == null || cw <= 0) return;
+        waveX = left() + (e.x - 0.5f) * cw;
+        waveY = rowTop(rowOf(e)) + ch / 2;
+        if (waveAnim != null) waveAnim.cancel();
+        waveAnim = animate01(850, new android.view.animation.LinearInterpolator(), v -> waveT = v);
+    }
+
+    /** この View 内での元素の中心座標。 */
+    float[] centerOf(Element e) {
+        return new float[]{left() + (e.x - 0.5f) * cw, rowTop(rowOf(e)) + ch / 2};
+    }
+
+    /** 端末の傾き (-1..1)。表を少し立体的に傾け、光沢の帯を動かす。 */
+    void setTilt(float tx, float ty) {
+        tiltX = tx;
+        tiltY = ty;
+        setRotationY(tx * 7f);
+        setRotationX(-ty * 7f);
         invalidate();
     }
 
@@ -215,7 +241,9 @@ public class PeriodicTableView extends View {
         int w = MeasureSpec.getSize(wSpec);
         float cellW = (w - 2 * pad) / 18f;
         int h = (int) Math.ceil(cellW * ASPECT * ROWS + 2 * pad);
-        if (MeasureSpec.getMode(hSpec) != MeasureSpec.UNSPECIFIED) h = Math.min(h, MeasureSpec.getSize(hSpec));
+        int hm = MeasureSpec.getMode(hSpec);
+        if (hm == MeasureSpec.EXACTLY) h = MeasureSpec.getSize(hSpec);
+        else if (hm == MeasureSpec.AT_MOST) h = Math.min(h, MeasureSpec.getSize(hSpec));
         setMeasuredDimension(w, h);
     }
 
@@ -228,7 +256,8 @@ public class PeriodicTableView extends View {
     private float left() { return (getWidth() - cw * 18) / 2f; }
 
     private float rowTop(float row) { // 0..6 = 第1-7周期, 7 = ランタノイド, 8 = アクチノイド
-        return pad + ch * HEADER + (row >= 7 ? row + ROW_GAP : row) * ch;
+        float top = Math.max(pad, (getHeight() - ch * ROWS) / 2f); // 余白があれば縦にも中央寄せ
+        return top + ch * HEADER + (row >= 7 ? row + ROW_GAP : row) * ch;
     }
 
     private static float rowOf(Element e) { return e.y <= 7 ? e.y - 1 : e.y - 2; }
@@ -269,7 +298,7 @@ public class PeriodicTableView extends View {
         text.setTextSize(ch * HEADER * 0.52f);
         text.setColor(dimmed(Ui.alpha(Ui.onSurfaceVar, 0.8f * Math.min(1f, appear * 3))));
         for (int g = 1; g <= 18; g++) {
-            canvas.drawText(String.valueOf(g), left() + (g - 0.5f) * cw, pad + ch * HEADER * 0.66f, text);
+            canvas.drawText(String.valueOf(g), left() + (g - 0.5f) * cw, rowTop(0) - ch * HEADER * 0.34f, text);
         }
 
         drawPlaceholder(canvas, 5, "57–71", "lanthanoid", corner);
@@ -310,6 +339,22 @@ public class PeriodicTableView extends View {
             scale *= 1f + 0.2f * flashT;
         }
         if (e == pressed) scale *= 0.9f;
+
+        // 波: 中心からの距離に応じて遅れて持ち上がる
+        if (waveT < 1f) {
+            float d = (float) Math.hypot(rect.centerX() - waveX, rect.centerY() - waveY) / (cw * 14f);
+            float ph = (waveT * 1.35f - d) * 5.5f;
+            float bump = (float) Math.exp(-ph * ph) * (1f - waveT);
+            scale *= 1f + 0.2f * bump;
+            fillColor = Ui.lerp(fillColor, 0xFFFFFFFF, 0.38f * bump);
+        }
+        // 光沢: 傾けると斜めの光の帯が表を横切る
+        float tiltAmt = Math.min(1f, (Math.abs(tiltX) + Math.abs(tiltY)) * 3f);
+        if (tiltAmt > 0.02f && !ok && !ng) {
+            float u = ((rect.centerX() - left()) / (cw * 18f) + (rect.centerY() - rowTop(0)) / (ch * 9.3f)) * 0.5f;
+            float band = (u - (0.5f + tiltX * 0.7f - tiltY * 0.4f)) * 4.5f;
+            fillColor = Ui.lerp(fillColor, 0xFFFFFFFF, 0.24f * tiltAmt * (float) Math.exp(-band * band));
+        }
 
         canvas.save();
         canvas.scale(scale, scale, rect.centerX(), rect.centerY());

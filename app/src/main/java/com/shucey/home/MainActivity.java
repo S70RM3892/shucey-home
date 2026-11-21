@@ -66,6 +66,42 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
     private AppDrawer drawer;
     private Element today;
     private String filter;
+    private BackgroundFx bg;
+    private TextClock clock, date;
+    private FlameView flameRow;
+    private boolean landscape;
+    private int insetL, insetT, insetR, insetB;
+    private boolean wasAwake;
+
+    // 端末の傾き（表の立体的な傾きと光沢に使う）
+    private android.hardware.SensorManager sensors;
+    private android.hardware.Sensor gravity;
+    private float baseX, baseY, tiltX, tiltY, sentX, sentY;
+    private boolean haveBase;
+    private final android.hardware.SensorEventListener tiltListener = new android.hardware.SensorEventListener() {
+        @Override public void onSensorChanged(android.hardware.SensorEvent ev) {
+            float gx = ev.values[0] / 9.81f, gy = ev.values[1] / 9.81f, x, y;
+            switch (getWindowManager().getDefaultDisplay().getRotation()) { // 画面の向きに合わせて軸を入れ替える
+                case android.view.Surface.ROTATION_90: x = -gy; y = gx; break;
+                case android.view.Surface.ROTATION_270: x = gy; y = -gx; break;
+                case android.view.Surface.ROTATION_180: x = -gx; y = -gy; break;
+                default: x = gx; y = gy;
+            }
+            if (!haveBase) { baseX = x; baseY = y; haveBase = true; }
+            // 基準はゆっくり今の持ち方に追従させる → 動かした瞬間だけ傾き、やがて戻る
+            baseX += (x - baseX) * 0.03f;
+            baseY += (y - baseY) * 0.03f;
+            float tx = Math.max(-1f, Math.min(1f, (baseX - x) * 3.2f)), ty = Math.max(-1f, Math.min(1f, (y - baseY) * 3.2f));
+            tiltX += (tx - tiltX) * 0.25f;
+            tiltY += (ty - tiltY) * 0.25f;
+            if (Math.abs(tiltX - sentX) + Math.abs(tiltY - sentY) > 0.006f) { // 静止中は再描画しない
+                sentX = tiltX;
+                sentY = tiltY;
+                table.setTilt(tiltX, tiltY);
+            }
+        }
+        @Override public void onAccuracyChanged(android.hardware.Sensor s, int a) {}
+    };
 
     private final BroadcastReceiver tick = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) { updateNight(); }
@@ -92,7 +128,13 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
 
         setContentView(buildUi());
+        arrange(getResources().getConfiguration().orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE);
         showHome(false);
+        sensors = (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE);
+        if (sensors != null) {
+            gravity = sensors.getDefaultSensor(android.hardware.Sensor.TYPE_GRAVITY);
+            if (gravity == null) gravity = sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER);
+        }
         table.playAppear();
 
         IntentFilter pf = new IntentFilter();
@@ -115,17 +157,16 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         root = new FrameLayout(this);
         root.setBackgroundColor(Ui.scrim);
 
+        bg = new BackgroundFx(this);
+        root.addView(bg, new FrameLayout.LayoutParams(-1, -1));
+
         home = new LinearLayout(this);
-        home.setOrientation(LinearLayout.VERTICAL);
         root.addView(home, new FrameLayout.LayoutParams(-1, -1));
 
         buildHeader();
         table = new PeriodicTableView(this);
         table.setElements(elements);
         table.setListener(this);
-        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, -2);
-        tlp.setMargins(Ui.dp(4), 0, Ui.dp(4), 0);
-        home.addView(table, tlp);
 
         buildModeBar();
         legendScroll = new HorizontalScrollView(this);
@@ -135,7 +176,6 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         legend = new LinearLayout(this);
         legend.setGravity(Gravity.CENTER_VERTICAL);
         legendScroll.addView(legend, new FrameLayout.LayoutParams(-2, Ui.dp(40)));
-        home.addView(legendScroll, new LinearLayout.LayoutParams(-1, -2));
         rebuildLegend();
 
         // --- 下半分: ホーム / 元素詳細 / クイズ を切り替える ---
@@ -145,10 +185,10 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         panelScroll.setFadingEdgeLength(Ui.dp(20));
         panelScroll.setOverScrollMode(View.OVER_SCROLL_ALWAYS);
         panelScroll.setClipToPadding(false);
-        panelScroll.setPadding(Ui.dp(12), Ui.dp(4), Ui.dp(12), Ui.dp(12));
+        panelScroll.setPadding(Ui.dp(12), 0, Ui.dp(12), 0);
         FrameLayout panel = new FrameLayout(this);
+        panel.setPadding(0, Ui.dp(4), 0, Ui.dp(14)); // 余白は中身側に（フェードの位置がずれないように）
         panelScroll.addView(panel, new FrameLayout.LayoutParams(-1, -2));
-        home.addView(panelScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
 
         buildHomeCards();
         panel.addView(homeCards, new FrameLayout.LayoutParams(-1, -2));
@@ -164,9 +204,6 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         dock.setGravity(Gravity.CENTER_VERTICAL);
         dock.setBackground(Ui.round(Ui.alpha(Ui.surface, 0.92f), 30));
         dock.setPadding(Ui.dp(10), Ui.dp(8), Ui.dp(10), Ui.dp(8));
-        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, Ui.dp(72));
-        dlp.setMargins(Ui.dp(12), 0, Ui.dp(12), Ui.dp(10));
-        home.addView(dock, dlp);
 
         magnifier = new MagnifierView(this);
         root.addView(magnifier, new FrameLayout.LayoutParams(-1, -1));
@@ -177,19 +214,23 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         root.addView(drawer, new FrameLayout.LayoutParams(-1, -1));
 
         root.setOnApplyWindowInsetsListener((v, insets) -> {
-            int top, bottom, ime;
+            int ime;
             if (Build.VERSION.SDK_INT >= 30) {
-                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-                top = bars.top;
-                bottom = bars.bottom;
-                ime = Math.max(bottom, insets.getInsets(WindowInsets.Type.ime()).bottom);
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                insetL = bars.left;
+                insetT = bars.top;
+                insetR = bars.right;
+                insetB = bars.bottom;
+                ime = Math.max(insetB, insets.getInsets(WindowInsets.Type.ime()).bottom);
             } else {
-                top = insets.getSystemWindowInsetTop();
+                insetL = insets.getSystemWindowInsetLeft();
+                insetT = insets.getSystemWindowInsetTop();
+                insetR = insets.getSystemWindowInsetRight();
                 ime = insets.getSystemWindowInsetBottom();
-                bottom = insets.getStableInsetBottom();
+                insetB = insets.getStableInsetBottom();
             }
-            home.setPadding(0, top, 0, bottom);
-            drawer.setInsets(top, ime);
+            home.setPadding(insetL, insetT, insetR, insetB);
+            drawer.setInsets(insetT, ime);
             return insets;
         });
         return root;
@@ -202,7 +243,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
 
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        TextClock clock = new TextClock(this);
+        clock = new TextClock(this);
         clock.setFormat24Hour("H:mm");
         clock.setFormat12Hour("H:mm");
         clock.setTextSize(44);
@@ -210,7 +251,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         clock.setIncludeFontPadding(false);
         clock.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         col.addView(clock);
-        TextClock date = new TextClock(this);
+        date = new TextClock(this);
         date.setFormat24Hour("M月d日 EEEE");
         date.setFormat12Hour("M月d日 EEEE");
         date.setTextColor(Ui.onSurfaceVar);
@@ -240,7 +281,101 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
             m.show();
         });
         header.addView(menu, new LinearLayout.LayoutParams(Ui.dp(44), Ui.dp(44)));
-        home.addView(header);
+    }
+
+    // ================================================================ 縦・横の配置
+
+    private static void detach(View v) {
+        if (v.getParent() != null) ((android.view.ViewGroup) v.getParent()).removeView(v);
+    }
+
+    /**
+     * 同じ部品を縦画面・横画面それぞれの配置に並べ替える（状態はそのまま）。
+     * 縦: 時計 / 周期表 / 切替 / 詳細 / ドック。横: 左に周期表、右に時計・切替・詳細、右端に縦ドック。
+     */
+    private void arrange(boolean land) {
+        landscape = land;
+        for (View v : new View[]{header, table, modeBar, legendScroll, panelScroll, dock}) detach(v);
+        home.removeAllViews();
+        clock.setTextSize(land ? 30 : 44);
+        for (int i = 0; i < modeBar.getChildCount(); i++) ((TextView) modeBar.getChildAt(i)).setTextSize(land ? 11 : 13);
+        date.setTextSize(land ? 12 : 14);
+        header.setPadding(Ui.dp(land ? 14 : 20), Ui.dp(land ? 4 : 10), Ui.dp(land ? 0 : 8), Ui.dp(land ? 0 : 6));
+        elementPanel.setColumns(land ? 2 : 3);
+        quizElementPanel.setColumns(land ? 2 : 3);
+        dock.setOrientation(land ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        dock.setGravity(land ? Gravity.CENTER_HORIZONTAL : Gravity.CENTER_VERTICAL);
+
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-1, -2);
+        mlp.setMargins(Ui.dp(12), Ui.dp(land ? 4 : 6), Ui.dp(12), 0);
+        if (land) {
+            home.setOrientation(LinearLayout.HORIZONTAL);
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -1, 1.75f);
+            tlp.setMargins(Ui.dp(8), Ui.dp(4), 0, Ui.dp(4));
+            home.addView(table, tlp);
+            LinearLayout right = new LinearLayout(this);
+            right.setOrientation(LinearLayout.VERTICAL);
+            right.addView(header);
+            right.addView(modeBar, mlp);
+            right.addView(legendScroll, new LinearLayout.LayoutParams(-1, -2));
+            right.addView(panelScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+            home.addView(right, new LinearLayout.LayoutParams(0, -1, 1f));
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(Ui.dp(68), -1);
+            dlp.setMargins(0, Ui.dp(8), Ui.dp(10), Ui.dp(8));
+            home.addView(dock, dlp);
+        } else {
+            home.setOrientation(LinearLayout.VERTICAL);
+            home.addView(header);
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, -2);
+            tlp.setMargins(Ui.dp(4), 0, Ui.dp(4), 0);
+            home.addView(table, tlp);
+            home.addView(modeBar, mlp);
+            home.addView(legendScroll, new LinearLayout.LayoutParams(-1, -2));
+            home.addView(panelScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, Ui.dp(72));
+            dlp.setMargins(Ui.dp(12), 0, Ui.dp(12), Ui.dp(10));
+            home.addView(dock, dlp);
+        }
+        rebuildDock();
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration c) {
+        super.onConfigurationChanged(c);
+        boolean land = c.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        if (land != landscape) {
+            drawer.close(false);
+            magnifier.hide();
+            arrange(land);
+        }
+    }
+
+    /** 触った瞬間に演出を起こす。放置後に止まっていた描画もここで再開する。 */
+    @Override
+    public boolean dispatchTouchEvent(android.view.MotionEvent ev) {
+        boolean was = Fx.awake();
+        Fx.wake();
+        if (!was) kick(root);
+        return super.dispatchTouchEvent(ev);
+    }
+
+    private void kick(View v) {
+        if (v instanceof BackgroundFx || v instanceof FlameView || v instanceof OrbitalView || v instanceof AtomView) v.invalidate();
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) kick(g.getChildAt(i));
+        }
+    }
+
+    /** 元素の位置から、表の波と背景の衝撃波を出す。 */
+    private void burst(Element e, int color) {
+        table.wave(e);
+        bg.setColor(color);
+        float[] c = table.centerOf(e);
+        int[] a = new int[2], b = new int[2];
+        table.getLocationInWindow(a);
+        bg.getLocationInWindow(b);
+        bg.pulse(a[0] - b[0] + c[0], a[1] - b[1] + c[1]);
     }
 
     private void buildModeBar() {
@@ -261,9 +396,6 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
             });
             modeBar.addView(t, new LinearLayout.LayoutParams(0, Ui.dp(32), 1f));
         }
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.setMargins(Ui.dp(12), Ui.dp(6), Ui.dp(12), 0);
-        home.addView(modeBar, lp);
         styleModeBar();
     }
 
@@ -388,6 +520,23 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         Ui.pressable(todayCard);
         homeCards.addView(todayCard);
 
+        // 炎色反応: 7 つの炎を実際の色で燃やす
+        LinearLayout flames = card();
+        flames.setPadding(Ui.dp(12), Ui.dp(12), Ui.dp(12), Ui.dp(10));
+        TextView ft = ElementPanel.text(this, 12, Ui.onSurfaceVar, true, "炎色反応");
+        ft.setPadding(Ui.dp(4), 0, 0, 0);
+        flames.addView(ft);
+        int[] fc = new int[Quiz.FLAME.length];
+        String[] fl = new String[Quiz.FLAME.length];
+        for (int i = 0; i < fc.length; i++) {
+            fc[i] = (int) Quiz.FLAME[i][2];
+            fl[i] = elements.get((int) Quiz.FLAME[i][0] - 1).symbol + "\n" + Quiz.FLAME[i][1];
+        }
+        flameRow = new FlameView(this);
+        flameRow.setFlames(fc, fl);
+        flames.addView(flameRow, new LinearLayout.LayoutParams(-1, Ui.dp(92)));
+        homeCards.addView(flames);
+
         // クイズ
         LinearLayout q = card();
         LinearLayout qhead = new LinearLayout(this);
@@ -418,27 +567,14 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         homeCards.addView(q);
         stylePools();
 
-        // 暗記カード
+        // 語呂
         LinearLayout tips = card();
         tips.addView(ElementPanel.text(this, 12, Ui.onSurfaceVar, true, "語呂（1〜20番）"));
         TextView goro = ElementPanel.text(this, 14, Ui.onSurface, false,
                 "水兵リーベ僕の船　七曲がるシップスクラークか\nH He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca");
         goro.setLineSpacing(0, 1.25f);
-        goro.setPadding(0, Ui.dp(2), 0, Ui.dp(10));
+        goro.setPadding(0, Ui.dp(2), 0, 0);
         tips.addView(goro);
-        tips.addView(ElementPanel.text(this, 12, Ui.onSurfaceVar, true, "炎色反応"));
-        SpannableStringBuilder fl = new SpannableStringBuilder();
-        for (Object[] f : Quiz.FLAME) {
-            Element e = elements.get((int) f[0] - 1);
-            int st = fl.length();
-            fl.append("●");
-            fl.setSpan(new ForegroundColorSpan((int) f[2]), st, fl.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            fl.append("⁠").append(e.symbol).append(" ").append((String) f[1]).append("　 ");
-        }
-        TextView flame = ElementPanel.text(this, 14, Ui.onSurface, false, fl);
-        flame.setLineSpacing(0, 1.3f);
-        flame.setPadding(0, Ui.dp(2), 0, 0);
-        tips.addView(flame);
         homeCards.addView(tips);
     }
 
@@ -543,6 +679,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         table.setQuizMode(false);
         table.setSelected(null);
         setChrome(true);
+        bg.setColor(Ui.accent);
         bindToday();
         stylePools();
         swap(homeCards, animate);
@@ -551,6 +688,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
     private void select(Element e) {
         boolean wasShown = elementPanel.getVisibility() == View.VISIBLE;
         table.setSelected(e);
+        burst(e, PeriodicTableView.categoryColor(e.category));
         elementPanel.bind(e);
         if (wasShown) {
             panelScroll.smoothScrollTo(0, 0);
@@ -600,6 +738,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         table.setSelected(null);
         table.setQuizMode(true);
         setChrome(false);
+        bg.setColor(Ui.accent);
         swap(quizPanel, true);
         nextQuestion();
     }
@@ -633,6 +772,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         Element target = quiz.current.answer;
         boolean ok = quiz.answer(tapped);
         table.flash(target, ok ? null : tapped);
+        burst(target, ok ? Ui.GOOD : Ui.BAD);
         renderStats();
         quizHint.setVisibility(View.GONE);
         if (ok) {
@@ -680,6 +820,7 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
     }
 
     private void rebuildDock() {
+        if (dock == null) return;
         dock.removeAllViews();
         PackageManager pm = getPackageManager();
         int count = 0;
@@ -702,13 +843,16 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
                 return true;
             });
             Ui.pressable(iv);
-            dock.addView(iv, new LinearLayout.LayoutParams(0, Ui.dp(56), 1f));
+            dock.addView(iv, landscape ? new LinearLayout.LayoutParams(Ui.dp(48), 0, 1f)
+                    : new LinearLayout.LayoutParams(0, Ui.dp(56), 1f));
             count++;
         }
         if (count == 0) {
-            TextView hint = ElementPanel.text(this, 13, Ui.onSurfaceVar, false, "上にスワイプでアプリ一覧。長押しでここに追加");
+            // 空のとき: 縦画面では使い方を表示、横画面（縦長のドック）では余白だけ
+            TextView hint = ElementPanel.text(this, 13, Ui.onSurfaceVar, false,
+                    landscape ? "" : "上にスワイプでアプリ一覧。長押しでここに追加");
             hint.setPadding(Ui.dp(10), 0, 0, 0);
-            dock.addView(hint, new LinearLayout.LayoutParams(0, -2, 1f));
+            dock.addView(hint, landscape ? new LinearLayout.LayoutParams(-1, 0, 1f) : new LinearLayout.LayoutParams(0, -2, 1f));
         }
         View apps = new AppsIcon(this);
         apps.setBackground(Ui.ripple(Ui.surfaceHigh, 24));
@@ -717,7 +861,8 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         apps.setOnLongClickListener(v -> { Ui.heavy(v); drawer.open(true); return true; });
         Ui.pressable(apps);
         LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(Ui.dp(48), Ui.dp(48));
-        alp.leftMargin = Ui.dp(6);
+        if (landscape) alp.topMargin = Ui.dp(6);
+        else alp.leftMargin = Ui.dp(6);
         dock.addView(apps, alp);
     }
 
@@ -740,7 +885,14 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
         // 一覧が上がるほどホームは奥に引いて暗くなる
         home.setScaleX(1f - 0.06f * p);
         home.setScaleY(1f - 0.06f * p);
-        home.setAlpha(1f - 0.75f * p);
+        home.setAlpha(1f - 0.6f * p);
+        if (Build.VERSION.SDK_INT >= 31) { // 背後を実際にぼかしてガラス越しのように見せる
+            float r = Ui.dpf(22) * p;
+            android.graphics.RenderEffect fx = p < 0.02f ? null
+                    : android.graphics.RenderEffect.createBlurEffect(r, r, android.graphics.Shader.TileMode.CLAMP);
+            home.setRenderEffect(fx);
+            bg.setRenderEffect(fx);
+        }
     }
 
     @Override
@@ -761,6 +913,10 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
     @Override
     protected void onResume() {
         super.onResume();
+        Fx.setResumed(true);
+        kick(root);
+        haveBase = false;
+        if (gravity != null) sensors.registerListener(tiltListener, gravity, android.hardware.SensorManager.SENSOR_DELAY_GAME);
         rebuildDock();
         updateNight();
         register(tick, new IntentFilter(Intent.ACTION_TIME_TICK));
@@ -769,6 +925,9 @@ public class MainActivity extends Activity implements PeriodicTableView.Listener
     @Override
     protected void onPause() {
         super.onPause();
+        Fx.setResumed(false);
+        if (gravity != null) sensors.unregisterListener(tiltListener);
+        table.setTilt(0, 0);
         try { unregisterReceiver(tick); } catch (IllegalArgumentException ignored) { /* 未登録 */ }
     }
 
