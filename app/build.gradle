@@ -1,0 +1,36 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.shucey.home"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.shucey.home"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // 個人利用向け: debug 鍵で署名してそのままインストールできる APK を出す
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+android.testOptions.unitTests.includeAndroidResources = true
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+    testImplementation "org.robolectric:robolectric:4.14.1"
+}
